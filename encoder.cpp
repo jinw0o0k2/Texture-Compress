@@ -30,9 +30,10 @@ struct BlockData {
     }
 };
 
-static string exe7z = "\"C:\\Program Files\\7-Zip\\7z.exe\"";
-static int compressionLevel = 9;
-static string archiveMode = "zip";
+static string exe7z = "C:\\Program Files\\7-Zip\\7z.exe";
+static string exePigz = "pigz";
+static int compressionLevel = 7;
+static string archiveMode = "pigz";
 
 string Quote(const string& value) {
     return "\"" + value + "\"";
@@ -227,16 +228,68 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
     return WriteWholeFile(outputBinPath, finalBuf.get(), finalOffset);
 }
 
-bool CompressWith7z(const fs::path& inputBin, const fs::path& archivePath) {
+bool ConfigurePigz(const fs::path& programPath) {
+    if (const char* configured = getenv("PIGZ_EXE")) {
+        if (*configured != '\0' && fs::exists(configured)) {
+            exePigz = fs::absolute(configured).string();
+            return true;
+        }
+    }
+
+    error_code ec;
+    fs::path besideProgram = fs::absolute(programPath, ec).parent_path() / "pigz.exe";
+    if (!ec && fs::exists(besideProgram)) {
+        exePigz = besideProgram.string();
+        return true;
+    }
+    if (fs::exists("pigz.exe")) {
+        exePigz = fs::absolute("pigz.exe").string();
+        return true;
+    }
+
+    return system("where pigz > NUL 2>&1") == 0;
+}
+
+bool CompressWithPigz(const fs::path& inputBin, const fs::path& archivePath) {
+    error_code ec;
+    fs::path absoluteInput = fs::absolute(inputBin);
+    fs::path absoluteArchive = fs::absolute(archivePath);
+    fs::path generatedArchive = absoluteInput;
+    generatedArchive += ".zip";
+
+    fs::remove(absoluteArchive, ec);
+    ec.clear();
+    fs::remove(generatedArchive, ec);
+
+    fs::path previousDirectory = fs::current_path(ec);
+    if (ec) return false;
+    fs::current_path(absoluteInput.parent_path(), ec);
+    if (ec) return false;
+
+    string cmd = Quote(exePigz) + " -K -" + to_string(compressionLevel) +
+                 " -k -f " + Quote(absoluteInput.filename().string()) +
+                 " > NUL 2>&1";
+    int result = system(("\"" + cmd + "\"").c_str());
+
+    error_code restoreError;
+    fs::current_path(previousDirectory, restoreError);
+    if (result != 0 || restoreError || !fs::exists(generatedArchive)) return false;
+
+    fs::rename(generatedArchive, absoluteArchive, ec);
+    return !ec && fs::exists(absoluteArchive);
+}
+
+bool CompressPreparedBin(const fs::path& inputBin, const fs::path& archivePath) {
+    if (archiveMode != "7z") return CompressWithPigz(inputBin, archivePath);
+
     error_code ec;
     fs::remove(archivePath, ec);
 
-    string typeArg = archiveMode == "7z" ? "-t7z" : "-tzip";
-    string cmd = "\"" + exe7z + " a " + typeArg +
+    string cmd = Quote(exe7z) + " a -t7z" +
                  " -mx=" + to_string(compressionLevel) + " -bd -y " +
                  Quote(fs::absolute(archivePath).string()) + " " +
-                 Quote(fs::absolute(inputBin).string()) + " > NUL 2>&1\"";
-    return system(cmd.c_str()) == 0 && fs::exists(archivePath);
+                 Quote(fs::absolute(inputBin).string()) + " > NUL 2>&1";
+    return system(("\"" + cmd + "\"").c_str()) == 0 && fs::exists(archivePath);
 }
 
 bool EncodeFile(const fs::path& inputPath,
@@ -259,7 +312,7 @@ bool EncodeFile(const fs::path& inputPath,
         return false;
     }
 
-    bool ok = CompressWith7z(tempBin, archivePath);
+    bool ok = CompressPreparedBin(tempBin, archivePath);
     fs::remove(tempBin, ec);
 
     if (ok) {
@@ -273,7 +326,7 @@ bool EncodeFile(const fs::path& inputPath,
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         cout << "Usage: " << argv[0]
-             << " <input.dds|folder> [output_folder] [zip|7z] [level=9]\n";
+             << " <input.dds|folder> [output_folder] [pigz|7z] [level=7]\n";
         return 1;
     }
 
@@ -284,8 +337,9 @@ int main(int argc, char* argv[]) {
 
     if (argc >= 4) {
         archiveMode = argv[3];
-        if (archiveMode != "zip" && archiveMode != "7z") {
-            cerr << "Archive mode must be zip or 7z.\n";
+        if (archiveMode == "zip") archiveMode = "pigz"; // Backward-compatible alias.
+        if (archiveMode != "pigz" && archiveMode != "7z") {
+            cerr << "Archive mode must be pigz or 7z.\n";
             return 1;
         }
     }
@@ -293,11 +347,17 @@ int main(int argc, char* argv[]) {
         try {
             compressionLevel = stoi(argv[4]);
         } catch (...) {
-            cerr << "Compression level must be an integer from 0 to 9.\n";
+            cerr << "Compression level must be an integer.\n";
             return 1;
         }
-        if (compressionLevel < 0 || compressionLevel > 9) {
-            cerr << "Compression level must be from 0 to 9.\n";
+        if (archiveMode == "pigz" && compressionLevel != 7 &&
+            compressionLevel != 8 && compressionLevel != 9) {
+            cerr << "pigz level must be 7, 8, or 9.\n";
+            return 1;
+        }
+        if (archiveMode == "7z" &&
+            (compressionLevel < 0 || compressionLevel > 9)) {
+            cerr << "7z level must be from 0 to 9.\n";
             return 1;
         }
     }
@@ -306,8 +366,13 @@ int main(int argc, char* argv[]) {
         cerr << "Input does not exist: " << inputPath.string() << '\n';
         return 1;
     }
-    if (!fs::exists("C:\\Program Files\\7-Zip\\7z.exe")) {
+    if (archiveMode == "7z" && !fs::exists(exe7z)) {
         cerr << "7-Zip was not found at C:\\Program Files\\7-Zip\\7z.exe\n";
+        return 1;
+    }
+    if (archiveMode == "pigz" && !ConfigurePigz(argv[0])) {
+        cerr << "pigz was not found. Put pigz.exe beside encoder.exe, add it to PATH,\n"
+             << "or set PIGZ_EXE to its full path.\n";
         return 1;
     }
 
