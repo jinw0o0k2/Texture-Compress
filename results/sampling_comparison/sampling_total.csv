@@ -1,0 +1,4 @@
+sample_percent,files,runs,scanline_selections,zorder_selections,matches_100_percent,original_bytes,compressed_bytes,compressed_percent,ratio,preprocess_total_avg_ms,secondary_total_avg_ms,total_encode_avg_ms,total_decode_avg_ms,all_verified
+100,55,5,41,14,55,250616704,68169511,27.200705,3.676375,29396.503,22434.618,51831.121,14863.436,true
+20,55,5,38,17,50,250616704,68168809,27.200425,3.676413,10922.992,22147.409,33070.401,13684.383,true
+10,55,5,36,19,46,250616704,68171791,27.201615,3.676252,8274.452,22335.755,30610.207,13781.653,true
