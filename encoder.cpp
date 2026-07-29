@@ -1,39 +1,39 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <execution>
 #include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
-#include <numeric>
 #include <string>
 #include <vector>
 
 #include "ScanAlgorithms.hpp"
-#include "miniz.h"
+#include "libdeflate.h"
 
 using namespace std;
 namespace fs = std::filesystem;
 
 struct BlockData {
-    uint64_t sortKey;
     uint32_t originalLinearIdx;
     uint16_t c0, c1;
     uint32_t c_idx;
     uint8_t a0, a1;
     uint64_t a_idx;
-
-    bool operator<(const BlockData& other) const {
-        if (sortKey != other.sortKey) return sortKey < other.sortKey;
-        return originalLinearIdx < other.originalLinearIdx;
-    }
 };
 
 static string exe7z = "C:\\Program Files\\7-Zip\\7z.exe";
 static string exePigz = "pigz";
 static int compressionLevel = 7;
 static string archiveMode = "pigz";
+static int requestedOrderMethod = -1;
+static int simulationSamplePercent = 20;
+
+const char* OrderMethodName(int method) {
+    if (method == 1) return "Hilbert";
+    if (method == 2) return "Z-order";
+    return "Scanline";
+}
 
 string Quote(const string& value) {
     return "\"" + value + "\"";
@@ -67,7 +67,11 @@ bool WriteWholeFile(const fs::path& path, const uint8_t* data, size_t size) {
 
 bool BuildOurPreprocessedBin(const fs::path& inputPath,
                              const fs::path& outputBinPath,
-                             int& bestMethod) {
+                             int& bestMethod,
+                             int forcedMethod = -1,
+                             vector<long>* simulatedSizes = nullptr,
+                             unsigned candidateMask = 0x7U,
+                             int samplePercent = 100) {
     vector<uint8_t> originBuffer;
     if (!ReadWholeFile(inputPath, originBuffer) || originBuffer.size() <= 128) {
         return false;
@@ -102,7 +106,7 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
     if (payloadSize % static_cast<size_t>(blockSize) != 0) return false;
 
     size_t blockCount = payloadSize / static_cast<size_t>(blockSize);
-    if (blockCount == 0) return false;
+    if (blockCount == 0 || blockCount > UINT32_MAX) return false;
     uint8_t* dPtr = originBuffer.data() + 128;
 
     vector<BlockData> blocks(blockCount);
@@ -132,29 +136,69 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
 
     const size_t bytesPerBlock = isBC3 ? 16 : 8;
     const size_t totalBufferSize = blockCount * bytesPerBlock;
+    const size_t expectedTopLevelBlocks =
+        static_cast<size_t>(blocksW) * blocksH;
+    const bool zOrderEligible =
+        blocksW == blocksH &&
+        ScanAlgorithms::isPowerOfTwo(blocksW) &&
+        blockCount == expectedTopLevelBlocks;
+
+    candidateMask &= 0x5U; // Scanline and Z-order only.
+    if (!zOrderEligible) {
+        candidateMask = 0x1U;
+        if (forcedMethod < 0 || forcedMethod == 2) forcedMethod = 0;
+    }
+    if (forcedMethod == 1 || forcedMethod > 2) return false;
+
+    shared_ptr<const vector<uint32_t>> zOrderLut;
+    vector<BlockData> zOrderBlocks;
+    const bool needZOrder =
+        zOrderEligible &&
+        (forcedMethod == 2 ||
+         (forcedMethod < 0 && (candidateMask & 0x4U) != 0));
+    if (needZOrder) {
+        zOrderLut =
+            ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
+        if (zOrderLut->size() != blockCount) return false;
+        zOrderBlocks.resize(blockCount);
+        for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
+            uint32_t targetIdx = (*zOrderLut)[linearIdx];
+            zOrderBlocks[targetIdx] = blocks[linearIdx];
+        }
+    }
+
+    if (samplePercent != 100 &&
+        samplePercent != 20 &&
+        samplePercent != 10) {
+        return false;
+    }
+    const size_t sampleCount =
+        samplePercent == 100
+            ? blockCount
+            : max<size_t>(
+                  1, (blockCount * static_cast<size_t>(samplePercent) + 99) /
+                         100);
+    vector<uint8_t> sampleMask;
+    if (sampleCount != blockCount) {
+        sampleMask.assign(blockCount, 0);
+        for (size_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
+            size_t linearIdx = sampleIdx * blockCount / sampleCount;
+            sampleMask[linearIdx] = 1;
+        }
+    }
 
     auto CalculateSizeInMemory = [&](int method) -> long {
-        vector<uint32_t> idxMap(blockCount);
-        iota(idxMap.begin(), idxMap.end(), 0);
+        const vector<BlockData>& orderedBlocks =
+            method == 2 ? zOrderBlocks : blocks;
 
-        vector<uint64_t> keys(blockCount);
-        for (size_t i = 0; i < blockCount; ++i) {
-            uint32_t y = static_cast<uint32_t>(i / blocksW);
-            uint32_t x = static_cast<uint32_t>(i % blocksW);
-            keys[i] = method == 1
-                ? ScanAlgorithms::getHilbertIndexForRect(blocksW, blocksH, x, y)
-                : ScanAlgorithms::getScanlineIndex(x, y, blocksW);
-        }
-
-        sort(execution::par, idxMap.begin(), idxMap.end(), [&](uint32_t a, uint32_t b) {
-            if (keys[a] != keys[b]) return keys[a] < keys[b];
-            return a < b;
-        });
-
-        unique_ptr<uint8_t[]> simBuf(new uint8_t[totalBufferSize]);
+        const size_t simulationBufferSize = sampleCount * bytesPerBlock;
+        unique_ptr<uint8_t[]> simBuf(new uint8_t[simulationBufferSize]);
         size_t offset = 0;
-        for (uint32_t index : idxMap) {
-            const auto& b = blocks[index];
+        for (const auto& b : orderedBlocks) {
+            if (!sampleMask.empty() &&
+                sampleMask[b.originalLinearIdx] == 0) {
+                continue;
+            }
             if (isBC3 || isBC4) {
                 simBuf[offset++] = b.a0;
                 simBuf[offset++] = b.a1;
@@ -170,31 +214,55 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
                 offset += 4;
             }
         }
+        if (offset != simulationBufferSize) return 0;
 
-        unsigned long compressedLen = mz_compressBound(
-            static_cast<unsigned long>(totalBufferSize));
-        unique_ptr<uint8_t[]> compressedBuf(new uint8_t[compressedLen]);
-        int status = mz_compress(compressedBuf.get(), &compressedLen,
-                                 simBuf.get(),
-                                 static_cast<unsigned long>(totalBufferSize));
-        return status == MZ_OK ? static_cast<long>(compressedLen) : 0;
+        libdeflate_compressor* compressor =
+            libdeflate_alloc_compressor(6);
+        if (!compressor) return 0;
+        size_t compressedCapacity =
+            libdeflate_zlib_compress_bound(
+                compressor, simulationBufferSize);
+        unique_ptr<uint8_t[]> compressedBuf(
+            new uint8_t[compressedCapacity]);
+        size_t compressedSize =
+            libdeflate_zlib_compress(
+                compressor, simBuf.get(), simulationBufferSize,
+                compressedBuf.get(), compressedCapacity);
+        libdeflate_free_compressor(compressor);
+        return compressedSize == 0
+                   ? 0
+                   : static_cast<long>(compressedSize);
     };
 
-    auto futureScan = async(launch::async, CalculateSizeInMemory, 0);
-    auto futureHilbert = async(launch::async, CalculateSizeInMemory, 1);
-    long sizeScan = futureScan.get();
-    long sizeHilbert = futureHilbert.get();
-    if (sizeScan <= 0 || sizeHilbert <= 0) return false;
-    bestMethod = sizeHilbert < sizeScan ? 1 : 0;
+    if (forcedMethod >= 0) {
+        bestMethod = forcedMethod;
+        if (simulatedSizes) simulatedSizes->clear();
+    } else {
+        if (candidateMask == 0) return false;
 
-    for (auto& block : blocks) {
-        uint32_t y = block.originalLinearIdx / blocksW;
-        uint32_t x = block.originalLinearIdx % blocksW;
-        block.sortKey = bestMethod == 1
-            ? ScanAlgorithms::getHilbertIndexForRect(blocksW, blocksH, x, y)
-            : ScanAlgorithms::getScanlineIndex(x, y, blocksW);
+        vector<future<long>> futures(3);
+        vector<long> sizes(3, 0);
+        for (int method = 0; method < 3; ++method) {
+            if ((candidateMask & (1U << method)) != 0) {
+                futures[method] =
+                    async(launch::async, CalculateSizeInMemory, method);
+            }
+        }
+
+        bestMethod = -1;
+        for (int method = 0; method < 3; ++method) {
+            if ((candidateMask & (1U << method)) == 0) continue;
+            sizes[method] = futures[method].get();
+            if (sizes[method] <= 0) return false;
+            if (bestMethod < 0 || sizes[method] < sizes[bestMethod]) {
+                bestMethod = method;
+            }
+        }
+        if (simulatedSizes) *simulatedSizes = sizes;
     }
-    sort(execution::par, blocks.begin(), blocks.end());
+
+    const vector<BlockData>& finalBlocks =
+        bestMethod == 2 ? zOrderBlocks : blocks;
 
     unique_ptr<uint8_t[]> finalBuf(new uint8_t[128 + 1 + totalBufferSize]);
     size_t finalOffset = 0;
@@ -203,23 +271,23 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
     finalBuf[finalOffset++] = static_cast<uint8_t>(bestMethod);
 
     if (isBC3 || isBC4) {
-        for (const auto& b : blocks) {
+        for (const auto& b : finalBlocks) {
             finalBuf[finalOffset++] = b.a0;
             finalBuf[finalOffset++] = b.a1;
         }
-        for (const auto& b : blocks) {
+        for (const auto& b : finalBlocks) {
             memcpy(finalBuf.get() + finalOffset, &b.a_idx, 6);
             finalOffset += 6;
         }
     }
     if (!isBC4) {
-        for (const auto& b : blocks) {
+        for (const auto& b : finalBlocks) {
             memcpy(finalBuf.get() + finalOffset, &b.c0, 2);
             finalOffset += 2;
             memcpy(finalBuf.get() + finalOffset, &b.c1, 2);
             finalOffset += 2;
         }
-        for (const auto& b : blocks) {
+        for (const auto& b : finalBlocks) {
             memcpy(finalBuf.get() + finalOffset, &b.c_idx, 4);
             finalOffset += 4;
         }
@@ -307,7 +375,9 @@ bool EncodeFile(const fs::path& inputPath,
     tempBin += ".tmp.bin";
 
     int bestMethod = 0;
-    if (!BuildOurPreprocessedBin(inputPath, tempBin, bestMethod)) {
+    if (!BuildOurPreprocessedBin(inputPath, tempBin, bestMethod,
+                                 requestedOrderMethod, nullptr, 0x5U,
+                                 simulationSamplePercent)) {
         fs::remove(tempBin, ec);
         return false;
     }
@@ -318,7 +388,7 @@ bool EncodeFile(const fs::path& inputPath,
     if (ok) {
         cout << "Encoded: " << inputPath.string()
              << " -> " << archivePath.string()
-             << " [" << (bestMethod == 1 ? "Hilbert" : "Scanline") << "]\n";
+             << " [" << OrderMethodName(bestMethod) << "]\n";
     }
     return ok;
 }
@@ -326,7 +396,8 @@ bool EncodeFile(const fs::path& inputPath,
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         cout << "Usage: " << argv[0]
-             << " <input.dds|folder> [output_folder] [pigz|7z] [level=7]\n";
+             << " <input.dds|folder> [output_folder] [pigz|7z] [level=7]"
+                " [auto|scanline|zorder] [sample=20|10|100]\n";
         return 1;
     }
 
@@ -361,7 +432,30 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-
+    if (argc >= 6) {
+        string order = argv[5];
+        if (order == "auto") requestedOrderMethod = -1;
+        else if (order == "scanline") requestedOrderMethod = 0;
+        else if (order == "zorder") requestedOrderMethod = 2;
+        else {
+            cerr << "Order must be auto, scanline, or zorder.\n";
+            return 1;
+        }
+    }
+    if (argc >= 7) {
+        try {
+            simulationSamplePercent = stoi(argv[6]);
+        } catch (...) {
+            cerr << "Sample percent must be 100, 20, or 10.\n";
+            return 1;
+        }
+        if (simulationSamplePercent != 100 &&
+            simulationSamplePercent != 20 &&
+            simulationSamplePercent != 10) {
+            cerr << "Sample percent must be 100, 20, or 10.\n";
+            return 1;
+        }
+    }
     if (!fs::exists(inputPath)) {
         cerr << "Input does not exist: " << inputPath.string() << '\n';
         return 1;

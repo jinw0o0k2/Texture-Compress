@@ -90,7 +90,7 @@ bool RestoreOurPreprocessedBin(const fs::path& binPath, const fs::path& outputPa
     uint8_t header[128];
     memcpy(header, buffer.data(), sizeof(header));
     uint8_t methodFlag = buffer[128];
-    if (methodFlag > 1) return false;
+    if (methodFlag > 2) return false;
 
     uint32_t height = 0;
     uint32_t width = 0;
@@ -146,20 +146,39 @@ bool RestoreOurPreprocessedBin(const fs::path& binPath, const fs::path& outputPa
     }
     if (offset != buffer.size()) return false;
 
-    vector<MapInfo> mapping(blockCount);
-    for (size_t i = 0; i < blockCount; ++i) {
-        uint32_t y = static_cast<uint32_t>(i / blocksW);
-        uint32_t x = static_cast<uint32_t>(i % blocksW);
-        mapping[i].linearIdx = static_cast<uint32_t>(i);
-        mapping[i].sortKey = methodFlag == 1
-            ? ScanAlgorithms::getHilbertIndexForRect(blocksW, blocksH, x, y)
-            : ScanAlgorithms::getScanlineIndex(x, y, blocksW);
-    }
-    sort(mapping.begin(), mapping.end());
-
     vector<BlockData> restoredBlocks(blockCount);
-    for (size_t i = 0; i < blockCount; ++i) {
-        restoredBlocks[mapping[i].linearIdx] = sortedBlocks[i];
+    if (methodFlag == 0) {
+        restoredBlocks = std::move(sortedBlocks);
+    } else if (methodFlag == 2) {
+        const size_t expectedTopLevelBlocks =
+            static_cast<size_t>(blocksW) * blocksH;
+        if (blocksW != blocksH ||
+            !ScanAlgorithms::isPowerOfTwo(blocksW) ||
+            blockCount != expectedTopLevelBlocks) {
+            return false;
+        }
+        auto zOrderLut =
+            ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
+        if (zOrderLut->size() != blockCount) return false;
+        for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
+            restoredBlocks[linearIdx] =
+                sortedBlocks[(*zOrderLut)[linearIdx]];
+        }
+    } else {
+        // Backward compatibility for archives produced by the old Hilbert encoder.
+        vector<MapInfo> mapping(blockCount);
+        for (size_t i = 0; i < blockCount; ++i) {
+            uint32_t y = static_cast<uint32_t>(i / blocksW);
+            uint32_t x = static_cast<uint32_t>(i % blocksW);
+            mapping[i].linearIdx = static_cast<uint32_t>(i);
+            mapping[i].sortKey =
+                ScanAlgorithms::getHilbertIndexForRect(
+                    blocksW, blocksH, x, y);
+        }
+        sort(mapping.begin(), mapping.end());
+        for (size_t i = 0; i < blockCount; ++i) {
+            restoredBlocks[mapping[i].linearIdx] = sortedBlocks[i];
+        }
     }
 
     unique_ptr<uint8_t[]> outBuf(new uint8_t[128 + blockCount * blockSize]);

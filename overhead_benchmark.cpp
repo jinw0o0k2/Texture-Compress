@@ -82,11 +82,12 @@ std::vector<fs::path> CollectDdsFiles(const fs::path& input) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || argc > 6) {
+    if (argc < 2 || argc > 7) {
         std::cout
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
-               " [pigz_level=7] [runs=5] [decoder.exe]\n";
+               " [pigz_level=7] [runs=5] [decoder.exe]"
+               " [sample=20]\n";
         return 1;
     }
 
@@ -95,11 +96,13 @@ int main(int argc, char* argv[]) {
                                 : fs::absolute("overhead_raw.csv");
     int level = 7;
     int runs = 5;
+    int samplePercent = 20;
     try {
         if (argc >= 4) level = std::stoi(argv[3]);
         if (argc >= 5) runs = std::stoi(argv[4]);
+        if (argc >= 7) samplePercent = std::stoi(argv[6]);
     } catch (...) {
-        std::cerr << "pigz_level and runs must be integers.\n";
+        std::cerr << "pigz_level, runs, and sample must be integers.\n";
         return 1;
     }
     fs::path programDir = fs::absolute(argv[0]).parent_path();
@@ -116,6 +119,12 @@ int main(int argc, char* argv[]) {
     }
     if (runs < 1) {
         std::cerr << "runs must be at least 1.\n";
+        return 1;
+    }
+    if (samplePercent != 100 &&
+        samplePercent != 20 &&
+        samplePercent != 10) {
+        std::cerr << "sample must be 100, 20, or 10.\n";
         return 1;
     }
     if (!fs::exists(decoderExe)) {
@@ -158,10 +167,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    raw << "file,run,pigz_level,original_bytes,prepared_bytes,compressed_bytes,"
+    raw << "file,run,pigz_level,sample_percent,"
+           "original_bytes,prepared_bytes,compressed_bytes,"
            "scan_method,preprocess_ms,secondary_compress_ms,total_encode_ms,"
            "total_decode_ms,verified\n";
-    summary << "file,runs,pigz_level,original_bytes,compressed_bytes,ratio,"
+    summary << "file,runs,pigz_level,sample_percent,"
+               "original_bytes,compressed_bytes,ratio,"
                "preprocess_avg_ms,secondary_compress_avg_ms,total_encode_avg_ms,"
                "total_decode_avg_ms,all_verified\n";
 
@@ -199,7 +210,9 @@ int main(int argc, char* argv[]) {
             int bestMethod = 0;
 
             auto preprocessBegin = Clock::now();
-            bool preparedOk = BuildOurPreprocessedBin(source, prepared, bestMethod);
+            bool preparedOk = BuildOurPreprocessedBin(
+                source, prepared, bestMethod, -1, nullptr, 0x5U,
+                samplePercent);
             auto preprocessEnd = Clock::now();
             if (!preparedOk) {
                 std::cerr << "Preprocessing failed: " << source.string() << '\n';
@@ -237,9 +250,10 @@ int main(int argc, char* argv[]) {
             average.totalDecodeMs += decodeMs;
 
             raw << Csv(average.relativePath) << ',' << run << ',' << level << ','
+                << samplePercent << ','
                 << average.originalBytes << ',' << fs::file_size(prepared) << ','
                 << average.compressedBytes << ','
-                << (bestMethod == 1 ? "Hilbert" : "Scanline") << ','
+                << OrderMethodName(bestMethod) << ','
                 << std::fixed << std::setprecision(3)
                 << preprocessMs << ',' << secondaryMs << ',' << totalEncodeMs << ','
                 << decodeMs << ',' << (verified ? "true" : "false") << '\n';
@@ -255,6 +269,7 @@ int main(int argc, char* argv[]) {
         averages.push_back(average);
 
         summary << Csv(average.relativePath) << ',' << runs << ',' << level << ','
+                << samplePercent << ','
                 << average.originalBytes << ',' << average.compressedBytes << ','
                 << std::fixed << std::setprecision(6)
                 << static_cast<double>(average.originalBytes) / average.compressedBytes << ','
@@ -285,6 +300,8 @@ int main(int argc, char* argv[]) {
               << "Files: " << averages.size() << '\n'
               << "Runs per file: " << runs << '\n'
               << "pigz level: " << level << '\n'
+              << "Sample: " << samplePercent << "%\n"
+              << "Simulation engine: libdeflate\n"
               << "Preprocess total average: " << preprocessTotal << " ms\n"
               << "Secondary compression total average: " << secondaryTotal << " ms\n"
               << "Total encode average: " << encodeTotal << " ms\n"

@@ -3,11 +3,56 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 class ScanAlgorithms {
 public:
     static uint64_t getScanlineIndex(uint32_t x, uint32_t y, uint32_t width) {
         return static_cast<uint64_t>(y) * width + x;
+    }
+
+    static uint64_t getZOrderIndex(uint32_t x, uint32_t y) {
+        auto spreadBits = [](uint32_t value) -> uint64_t {
+            uint64_t bits = value;
+            bits = (bits | (bits << 16)) & 0x0000FFFF0000FFFFULL;
+            bits = (bits | (bits << 8)) & 0x00FF00FF00FF00FFULL;
+            bits = (bits | (bits << 4)) & 0x0F0F0F0F0F0F0F0FULL;
+            bits = (bits | (bits << 2)) & 0x3333333333333333ULL;
+            bits = (bits | (bits << 1)) & 0x5555555555555555ULL;
+            return bits;
+        };
+        return spreadBits(x) | (spreadBits(y) << 1);
+    }
+
+    static bool isPowerOfTwo(uint32_t value) {
+        return value != 0 && (value & (value - 1)) == 0;
+    }
+
+    static std::shared_ptr<const std::vector<uint32_t>>
+    getZOrderLinearToTargetLut(uint32_t side) {
+        static std::mutex cacheMutex;
+        static std::unordered_map<
+            uint32_t,
+            std::shared_ptr<const std::vector<uint32_t>>> cache;
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto found = cache.find(side);
+        if (found != cache.end()) return found->second;
+
+        const size_t count = static_cast<size_t>(side) * side;
+        auto lut = std::make_shared<std::vector<uint32_t>>(count);
+        for (uint32_t y = 0; y < side; ++y) {
+            for (uint32_t x = 0; x < side; ++x) {
+                size_t linear = static_cast<size_t>(y) * side + x;
+                (*lut)[linear] =
+                    static_cast<uint32_t>(getZOrderIndex(x, y));
+            }
+        }
+        cache.emplace(side, lut);
+        return lut;
     }
 
     static void rotateHilbert(uint32_t n,
