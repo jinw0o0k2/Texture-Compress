@@ -87,7 +87,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 6) {
         std::cout << "Usage: " << argv[0]
                   << " <input.dds|folder> [output_dir=sampling_comparison]"
-                     " [legacy_level=7] [runs=5] [ignored_decoder_arg]\n";
+                     " [legacy_level=7] [runs=5]\n";
         return 1;
     }
 

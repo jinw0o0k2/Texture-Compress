@@ -135,13 +135,13 @@ decoder.exe "C:\Encoded\texture.dds.packed.lz4" "C:\Restored"
 ## 오버헤드 측정
 
 ```text
-overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [legacy_level=7] [runs=5] [ignored_decoder_arg] [sample=20]
+overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [legacy_level=7] [runs=5] [sample=20]
 ```
 
 20% 샘플을 파일당 5회 측정:
 
 ```bat
-overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 decoder.exe 20
+overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 20
 ```
 
 측정 항목:
@@ -161,7 +161,7 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 decoder.exe 20
 ## 샘플링 비교
 
 ```text
-sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [legacy_level=7] [runs=5] [ignored_decoder_arg]
+sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [legacy_level=7] [runs=5]
 ```
 
 100%·20%·10%를 파일과 회차마다 교차 실행하여 다음 파일을 생성합니다.

@@ -90,8 +90,7 @@ int main(int argc, char* argv[]) {
         std::cout
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
-               " [legacy_level=7] [runs=5] [ignored_decoder_arg]"
-               " [sample=20]\n";
+               " [legacy_level=7] [runs=5] [sample=20]\n";
         return 1;
     }
 
@@ -104,7 +103,12 @@ int main(int argc, char* argv[]) {
     try {
         if (argc >= 4) level = std::stoi(argv[3]);
         if (argc >= 5) runs = std::stoi(argv[4]);
-        if (argc >= 7) samplePercent = std::stoi(argv[6]);
+        if (argc >= 7) {
+            // Backward compatibility with the old decoder.exe argument.
+            samplePercent = std::stoi(argv[6]);
+        } else if (argc >= 6) {
+            samplePercent = std::stoi(argv[5]);
+        }
     } catch (...) {
         std::cerr << "legacy_level, runs, and sample must be integers.\n";
         return 1;
