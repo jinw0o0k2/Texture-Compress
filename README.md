@@ -16,7 +16,7 @@ DDS의 BC 압축 블록을 압축 친화적인 순서와 구조로 재배치한 
 인코더는 각 DDS에 대해 다음 작업을 수행합니다.
 
 1. 128바이트 DDS 헤더와 BC 블록을 읽습니다.
-2. Scanline과 Hilbert 순서의 예상 압축 크기를 `miniz`로 동시에 계산합니다.
+2. Scanline과 Hilbert 순서의 예상 압축 크기를 고속 `LZ4 default`로 동시에 계산합니다.
 3. 더 작은 결과를 만드는 순서를 선택합니다.
 4. BC 블록의 엔드포인트와 인덱스 데이터를 압축 친화적으로 분리·재배열합니다.
 5. 전처리된 BIN을 pigz Deflate ZIP 또는 7-Zip LZMA2 기반 7Z로 압축합니다.
@@ -27,9 +27,10 @@ pigz의 `-K` 옵션으로 생성되는 `.packed.zip`은 표준 단일 엔트리 
 
 - Windows
 - C++17 이상을 지원하는 컴파일러
-- `miniz.h`와 `miniz.c`
+- CMake 3.20 이상
+- [LZ4](https://github.com/lz4/lz4)
   - Scanline/Hilbert 후보 크기 비교에 사용합니다.
-  - `encoder.cpp`와 같은 디렉터리에 배치하십시오.
+  - CMake 구성 시 공식 LZ4 v1.10.0을 자동으로 가져와 정적 링크합니다.
 - pigz
   - `pigz.exe`와 필요한 런타임 DLL을 `encoder.exe` 옆에 배치하거나 `PATH`에 추가하십시오.
   - 또는 `PIGZ_EXE` 환경 변수에 실행 파일의 전체 경로를 지정할 수 있습니다.
@@ -42,12 +43,12 @@ pigz의 `-K` 옵션으로 생성되는 `.packed.zip`은 표준 단일 엔트리 
 Visual Studio Developer Command Prompt에서:
 
 ```bat
-cl /std:c++17 /EHsc /O2 encoder.cpp miniz.c /Fe:encoder.exe
-cl /std:c++17 /EHsc /O2 decoder.cpp /Fe:decoder.exe
-cl /std:c++17 /EHsc /O2 overhead_benchmark.cpp miniz.c /Fe:overhead_benchmark.exe
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
 ```
 
-`overhead_benchmark.cpp`는 내부에서 `encoder.cpp`를 포함하므로 벤치마크를 빌드할 때 `encoder.cpp`를 명령행에 다시 추가하지 마십시오.
+실행 파일은 `build\Release`에 생성됩니다. `overhead_benchmark.cpp`는 내부에서
+`encoder.cpp`를 포함하므로 별도의 소스 인자로 다시 추가하지 마십시오.
 
 병렬 STL 구현에 따라 추가 런타임 라이브러리가 필요할 수 있습니다.
 
@@ -160,7 +161,7 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\overhead_level9.csv" 9 5
 
 측정 항목:
 
-- `preprocess_ms`: Scanline/Hilbert 후보 비교와 최종 BIN 생성 시간
+- `preprocess_ms`: LZ4 기반 Scanline/Hilbert 후보 비교와 최종 BIN 생성 시간
 - `secondary_compress_ms`: 전처리된 BIN을 pigz ZIP으로 압축하는 시간
 - `total_encode_ms`: 전처리와 2차 압축 시간의 합
 - `total_decode_ms`: ZIP 해제부터 DDS 파일 복원 및 쓰기까지의 전체 시간

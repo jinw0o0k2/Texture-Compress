@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "lz4.h"
 #include "ScanAlgorithms.hpp"
-#include "miniz.h"
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -146,7 +146,11 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
                 : ScanAlgorithms::getScanlineIndex(x, y, blocksW);
         }
 
+#ifdef _MSC_VER
         sort(execution::par, idxMap.begin(), idxMap.end(), [&](uint32_t a, uint32_t b) {
+#else
+        sort(idxMap.begin(), idxMap.end(), [&](uint32_t a, uint32_t b) {
+#endif
             if (keys[a] != keys[b]) return keys[a] < keys[b];
             return a < b;
         });
@@ -171,13 +175,21 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
             }
         }
 
-        unsigned long compressedLen = mz_compressBound(
-            static_cast<unsigned long>(totalBufferSize));
-        unique_ptr<uint8_t[]> compressedBuf(new uint8_t[compressedLen]);
-        int status = mz_compress(compressedBuf.get(), &compressedLen,
-                                 simBuf.get(),
-                                 static_cast<unsigned long>(totalBufferSize));
-        return status == MZ_OK ? static_cast<long>(compressedLen) : 0;
+        if (totalBufferSize > static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
+            return 0;
+        }
+
+        const int sourceSize = static_cast<int>(totalBufferSize);
+        const int compressedCapacity = LZ4_compressBound(sourceSize);
+        if (compressedCapacity <= 0) return 0;
+
+        unique_ptr<char[]> compressedBuf(new char[compressedCapacity]);
+        const int compressedSize = LZ4_compress_default(
+            reinterpret_cast<const char*>(simBuf.get()),
+            compressedBuf.get(),
+            sourceSize,
+            compressedCapacity);
+        return compressedSize > 0 ? static_cast<long>(compressedSize) : 0;
     };
 
     auto futureScan = async(launch::async, CalculateSizeInMemory, 0);
@@ -194,7 +206,11 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
             ? ScanAlgorithms::getHilbertIndexForRect(blocksW, blocksH, x, y)
             : ScanAlgorithms::getScanlineIndex(x, y, blocksW);
     }
+#ifdef _MSC_VER
     sort(execution::par, blocks.begin(), blocks.end());
+#else
+    sort(blocks.begin(), blocks.end());
+#endif
 
     unique_ptr<uint8_t[]> finalBuf(new uint8_t[128 + 1 + totalBufferSize]);
     size_t finalOffset = 0;
