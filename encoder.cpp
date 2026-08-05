@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "lz4.h"
 #include "ScanAlgorithms.hpp"
-#include "libdeflate.h"
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -216,22 +216,22 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
         }
         if (offset != simulationBufferSize) return 0;
 
-        libdeflate_compressor* compressor =
-            libdeflate_alloc_compressor(6);
-        if (!compressor) return 0;
-        size_t compressedCapacity =
-            libdeflate_zlib_compress_bound(
-                compressor, simulationBufferSize);
-        unique_ptr<uint8_t[]> compressedBuf(
-            new uint8_t[compressedCapacity]);
-        size_t compressedSize =
-            libdeflate_zlib_compress(
-                compressor, simBuf.get(), simulationBufferSize,
-                compressedBuf.get(), compressedCapacity);
-        libdeflate_free_compressor(compressor);
-        return compressedSize == 0
-                   ? 0
-                   : static_cast<long>(compressedSize);
+        if (simulationBufferSize >
+            static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
+            return 0;
+        }
+        const int sourceSize =
+            static_cast<int>(simulationBufferSize);
+        const int compressedCapacity = LZ4_compressBound(sourceSize);
+        if (compressedCapacity <= 0) return 0;
+
+        unique_ptr<char[]> compressedBuf(new char[compressedCapacity]);
+        const int compressedSize = LZ4_compress_default(
+            reinterpret_cast<const char*>(simBuf.get()),
+            compressedBuf.get(), sourceSize, compressedCapacity);
+        return compressedSize > 0
+                   ? static_cast<long>(compressedSize)
+                   : 0;
     };
 
     if (forcedMethod >= 0) {

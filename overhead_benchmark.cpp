@@ -167,11 +167,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    raw << "file,run,pigz_level,sample_percent,"
+    raw << "file,run,pigz_level,sample_percent,simulation_engine,"
            "original_bytes,prepared_bytes,compressed_bytes,"
            "scan_method,preprocess_ms,secondary_compress_ms,total_encode_ms,"
            "total_decode_ms,verified\n";
-    summary << "file,runs,pigz_level,sample_percent,"
+    summary << "file,runs,pigz_level,sample_percent,simulation_engine,"
                "original_bytes,compressed_bytes,ratio,"
                "preprocess_avg_ms,secondary_compress_avg_ms,total_encode_avg_ms,"
                "total_decode_avg_ms,all_verified\n";
@@ -250,7 +250,7 @@ int main(int argc, char* argv[]) {
             average.totalDecodeMs += decodeMs;
 
             raw << Csv(average.relativePath) << ',' << run << ',' << level << ','
-                << samplePercent << ','
+                << samplePercent << ",LZ4-default,"
                 << average.originalBytes << ',' << fs::file_size(prepared) << ','
                 << average.compressedBytes << ','
                 << OrderMethodName(bestMethod) << ','
@@ -269,7 +269,7 @@ int main(int argc, char* argv[]) {
         averages.push_back(average);
 
         summary << Csv(average.relativePath) << ',' << runs << ',' << level << ','
-                << samplePercent << ','
+                << samplePercent << ",LZ4-default,"
                 << average.originalBytes << ',' << average.compressedBytes << ','
                 << std::fixed << std::setprecision(6)
                 << static_cast<double>(average.originalBytes) / average.compressedBytes << ','
@@ -301,7 +301,7 @@ int main(int argc, char* argv[]) {
               << "Runs per file: " << runs << '\n'
               << "pigz level: " << level << '\n'
               << "Sample: " << samplePercent << "%\n"
-              << "Simulation engine: libdeflate\n"
+              << "Simulation engine: LZ4-default\n"
               << "Preprocess total average: " << preprocessTotal << " ms\n"
               << "Secondary compression total average: " << secondaryTotal << " ms\n"
               << "Total encode average: " << encodeTotal << " ms\n"

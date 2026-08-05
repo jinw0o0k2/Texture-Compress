@@ -128,14 +128,14 @@ int main(int argc, char* argv[]) {
     std::ofstream total(output / "sampling_total.csv");
     if (!raw || !perFile || !total) return 1;
 
-    raw << "file,sample_percent,run,selected_method,original_bytes,"
+    raw << "file,sample_percent,simulation_engine,run,selected_method,original_bytes,"
            "compressed_bytes,compressed_percent,preprocess_ms,secondary_ms,"
            "total_encode_ms,total_decode_ms,verified\n";
-    perFile << "file,sample_percent,runs,selected_method,original_bytes,"
+    perFile << "file,sample_percent,simulation_engine,runs,selected_method,original_bytes,"
                "compressed_bytes,compressed_percent,preprocess_avg_ms,"
                "secondary_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
                "matches_100_percent,all_verified\n";
-    total << "sample_percent,files,runs,scanline_selections,zorder_selections,"
+    total << "sample_percent,simulation_engine,files,runs,scanline_selections,zorder_selections,"
              "matches_100_percent,original_bytes,compressed_bytes,"
              "compressed_percent,ratio,preprocess_total_avg_ms,"
              "secondary_total_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
@@ -229,7 +229,7 @@ int main(int argc, char* argv[]) {
                 value.decodeMs += decodeMs;
 
                 raw << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ',' << run << ',' << OrderMethodName(selectedMethod)
+                    << ",LZ4-default," << run << ',' << OrderMethodName(selectedMethod)
                     << ',' << value.originalBytes << ','
                     << value.compressedBytes << ','
                     << std::fixed << std::setprecision(6)
@@ -261,7 +261,7 @@ int main(int argc, char* argv[]) {
             if (matches) ++matches100[samplePercent];
 
             perFile << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ',' << runs << ','
+                    << ",LZ4-default," << runs << ','
                     << OrderMethodName(selectedMethods[sampleIndex]) << ','
                     << value.originalBytes << ',' << value.compressedBytes
                     << ',' << std::fixed << std::setprecision(6)
@@ -288,7 +288,7 @@ int main(int argc, char* argv[]) {
 
     for (int samplePercent : kSamples) {
         const Aggregate& value = totals.at(samplePercent);
-        total << samplePercent << ',' << files.size() << ',' << runs << ','
+        total << samplePercent << ",LZ4-default," << files.size() << ',' << runs << ','
               << value.scanlineSelections << ',' << value.zOrderSelections
               << ',' << matches100[samplePercent] << ','
               << value.originalBytes << ',' << value.compressedBytes << ','
@@ -307,7 +307,8 @@ int main(int argc, char* argv[]) {
     for (int samplePercent : kSamples) {
         verified = verified && totals[samplePercent].verified;
     }
-    std::cout << "Completed sampling comparison. Verified: "
+    std::cout << "Simulation engine: LZ4-default\n"
+              << "Completed sampling comparison. Verified: "
               << (verified ? "true" : "false") << '\n';
     return verified ? 0 : 3;
 }

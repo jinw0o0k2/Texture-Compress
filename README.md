@@ -17,7 +17,7 @@ pigz ZIP 또는 7Z로 2차 압축하는 Windows용 C++ 인코더/디코더입니
    - 페이로드 블록 수가 `blocksW * blocksH`와 동일
 3. 조건을 만족하지 않으면 후보 시뮬레이션 없이 Scanline으로 고정합니다.
 4. 조건을 만족하면 전체 블록에서 균일하게 추출한 20% 샘플을
-   libdeflate로 압축하여 Scanline과 Z-order를 비교합니다.
+   LZ4 default로 압축하여 Scanline과 Z-order를 비교합니다.
 5. 더 작은 후보를 선택하고 전체 블록을 해당 순서로 배치합니다.
 6. 전처리된 BIN을 pigz ZIP 또는 7Z로 압축합니다.
 
@@ -48,7 +48,7 @@ pigz ZIP 또는 7Z로 2차 압축하는 Windows용 C++ 인코더/디코더입니
 
 - Windows
 - C++17 컴파일러
-- [libdeflate v1.25](https://github.com/ebiggers/libdeflate/releases/tag/v1.25)
+- [LZ4 v1.10.0](https://github.com/lz4/lz4/releases/tag/v1.10.0)
   - Scanline/Z-order 후보 크기 비교에 사용합니다.
   - 최종 ZIP 압축기가 아니라 선택 시뮬레이션 엔진입니다.
 - pigz
@@ -60,7 +60,7 @@ pigz ZIP 또는 7Z로 2차 압축하는 Windows용 C++ 인코더/디코더입니
 
 ## 빌드
 
-저장소의 `CMakeLists.txt`가 공식 libdeflate v1.25를 자동으로 받아 정적
+저장소의 `CMakeLists.txt`가 공식 LZ4 v1.10.0을 자동으로 받아 정적
 라이브러리로 연결합니다. 최초 구성에는 인터넷 연결과 Git이 필요합니다.
 
 ```bat
