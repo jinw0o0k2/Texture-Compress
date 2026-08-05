@@ -135,7 +135,7 @@ decoder.exe "C:\Encoded\texture.dds.packed.lz4" "C:\Restored"
 ## 오버헤드 측정
 
 ```text
-overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [legacy_level=7] [runs=5] [decoder.exe] [sample=20]
+overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [legacy_level=7] [runs=5] [ignored_decoder_arg] [sample=20]
 ```
 
 20% 샘플을 파일당 5회 측정:
@@ -149,7 +149,9 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 decoder.exe 20
 - `preprocess_ms`: 적격성 검사, 샘플 후보 비교, LUT 직접 배치 및 BIN 쓰기
 - `secondary_compress_ms`: 전처리 데이터를 인프로세스 LZ4로 압축하고 쓰는 시간
 - `total_encode_ms`: 전처리와 LZ4 압축·쓰기 시간의 합
-- `total_decode_ms`: LZ4 파일 읽기, 압축 해제, DDS 복원·쓰기 시간
+- `decode_core_ms`: 별도 프로세스 없이 LZ4 압축 해제와 DDS 메모리 복원 시간
+- `decode_write_ms`: 복원된 DDS를 파일로 쓰는 시간
+- `total_decode_ms`: `decode_core_ms`와 `decode_write_ms`의 합
 - `compressed_bytes`, `ratio`: 최종 크기와 압축 배율
 - `scan_method`: 실제 선택된 Scanline 또는 Z-order
 - `verified`: 복원 결과가 원본과 같은지 여부
@@ -159,7 +161,7 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 decoder.exe 20
 ## 샘플링 비교
 
 ```text
-sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [legacy_level=7] [runs=5] [decoder.exe]
+sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [legacy_level=7] [runs=5] [ignored_decoder_arg]
 ```
 
 100%·20%·10%를 파일과 회차마다 교차 실행하여 다음 파일을 생성합니다.

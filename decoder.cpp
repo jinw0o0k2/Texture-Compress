@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "PackedLz4.hpp"
+#include "PreprocessedRestore.hpp"
 #include "ScanAlgorithms.hpp"
 
 using namespace std;
@@ -222,8 +223,14 @@ bool RestoreOurPreprocessedData(const vector<uint8_t>& buffer,
 bool RestoreOurPreprocessedBin(const fs::path& binPath,
                                const fs::path& outputPath) {
     vector<uint8_t> buffer;
-    return ReadWholeFile(binPath, buffer) &&
-           RestoreOurPreprocessedData(buffer, outputPath);
+    vector<uint8_t> dds;
+    if (!ReadWholeFile(binPath, buffer) ||
+        !PreprocessedRestore::ToDds(buffer, dds)) {
+        return false;
+    }
+    error_code ec;
+    fs::create_directories(outputPath.parent_path(), ec);
+    return !ec && WriteWholeFile(outputPath, dds.data(), dds.size());
 }
 
 string RemovePackedExtension(string filename) {
@@ -271,9 +278,16 @@ bool DecodeFile(const fs::path& archivePath,
     if (archivePath.extension() == ".lz4") {
         vector<uint8_t> packed;
         vector<uint8_t> prepared;
+        vector<uint8_t> dds;
         ok = ReadWholeFile(archivePath, packed) &&
              PackedLz4::Decompress(packed, prepared) &&
-             RestoreOurPreprocessedData(prepared, outputPath);
+             PreprocessedRestore::ToDds(prepared, dds);
+        if (ok) {
+            error_code ec;
+            fs::create_directories(outputPath.parent_path(), ec);
+            ok = !ec && WriteWholeFile(
+                            outputPath, dds.data(), dds.size());
+        }
     } else {
         auto uniqueValue = chrono::high_resolution_clock::now()
                                .time_since_epoch().count();

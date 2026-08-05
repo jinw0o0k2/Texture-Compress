@@ -8,6 +8,8 @@
 #include <iomanip>
 #include <map>
 
+#include "PreprocessedRestore.hpp"
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -19,6 +21,8 @@ struct Aggregate {
     double preprocessMs = 0.0;
     double secondaryMs = 0.0;
     double encodeMs = 0.0;
+    double decodeCoreMs = 0.0;
+    double decodeWriteMs = 0.0;
     double decodeMs = 0.0;
     int scanlineSelections = 0;
     int zOrderSelections = 0;
@@ -83,7 +87,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 6) {
         std::cout << "Usage: " << argv[0]
                   << " <input.dds|folder> [output_dir=sampling_comparison]"
-                     " [legacy_level=7] [runs=5] [decoder.exe]\n";
+                     " [legacy_level=7] [runs=5] [ignored_decoder_arg]\n";
         return 1;
     }
 
@@ -99,12 +103,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "legacy level and runs must be integers.\n";
         return 1;
     }
-    fs::path programDir = fs::absolute(argv[0]).parent_path();
-    fs::path decoder = argc >= 6 ? fs::absolute(argv[5])
-                                 : programDir / "decoder.exe";
-    if (!fs::exists(input) || !fs::exists(decoder) ||
+    if (!fs::exists(input) ||
         (level != 7 && level != 8 && level != 9) || runs < 1) {
-        std::cerr << "Invalid input, decoder, level, or run count.\n";
+        std::cerr << "Invalid input, level, or run count.\n";
         return 1;
     }
 
@@ -126,16 +127,18 @@ int main(int argc, char* argv[]) {
 
     raw << "file,sample_percent,simulation_engine,archive_codec,run,selected_method,original_bytes,"
            "compressed_bytes,compressed_percent,preprocess_ms,secondary_ms,"
-           "total_encode_ms,total_decode_ms,verified\n";
+           "total_encode_ms,decode_core_ms,decode_write_ms,total_decode_ms,"
+           "verified\n";
     perFile << "file,sample_percent,simulation_engine,archive_codec,runs,selected_method,original_bytes,"
                "compressed_bytes,compressed_percent,preprocess_avg_ms,"
-               "secondary_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
+               "secondary_avg_ms,total_encode_avg_ms,decode_core_avg_ms,"
+               "decode_write_avg_ms,total_decode_avg_ms,"
                "matches_100_percent,all_verified\n";
     total << "sample_percent,simulation_engine,archive_codec,files,runs,scanline_selections,zorder_selections,"
              "matches_100_percent,original_bytes,compressed_bytes,"
              "compressed_percent,ratio,preprocess_total_avg_ms,"
-             "secondary_total_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
-             "all_verified\n";
+             "secondary_total_avg_ms,total_encode_avg_ms,decode_core_total_avg_ms,"
+             "decode_write_total_avg_ms,total_decode_avg_ms,all_verified\n";
 
     archiveMode = "lz4";
     compressionLevel = level;
@@ -201,25 +204,22 @@ int main(int argc, char* argv[]) {
                 auto secondaryEnd = Clock::now();
                 if (!compressed) return 2;
 
-                std::string command = Quote(decoder.string()) + " " +
-                                      Quote(archive.string()) + " " +
-                                      Quote(decodeDir.string());
-#ifdef _WIN32
-                command += " > NUL 2>&1";
-#else
-                command += " > /dev/null 2>&1";
-#endif
-                auto decodeBegin = Clock::now();
-#ifdef _WIN32
-                int decodeResult = system(("\"" + command + "\"").c_str());
-#else
-                int decodeResult = system(command.c_str());
-#endif
-                auto decodeEnd = Clock::now();
-
                 fs::path restored = decodeDir / source.filename();
-                bool verified =
-                    decodeResult == 0 && FilesEqual(source, restored);
+                vector<uint8_t> decodedPrepared;
+                vector<uint8_t> restoredDds;
+                auto decodeCoreBegin = Clock::now();
+                bool decoded =
+                    PackedLz4::Decompress(packed, decodedPrepared) &&
+                    PreprocessedRestore::ToDds(
+                        decodedPrepared, restoredDds);
+                auto decodeCoreEnd = Clock::now();
+                auto decodeWriteBegin = Clock::now();
+                bool wrote = decoded &&
+                             WriteWholeFile(restored, restoredDds.data(),
+                                            restoredDds.size());
+                auto decodeWriteEnd = Clock::now();
+
+                bool verified = wrote && FilesEqual(source, restored);
                 value.verified = value.verified && verified;
 
                 double preprocessMs =
@@ -227,11 +227,15 @@ int main(int argc, char* argv[]) {
                 double secondaryMs =
                     Ms(secondaryBegin, secondaryEnd);
                 double encodeMs = preprocessMs + secondaryMs;
-                double decodeMs = Ms(decodeBegin, decodeEnd);
+                double decodeCoreMs = Ms(decodeCoreBegin, decodeCoreEnd);
+                double decodeWriteMs = Ms(decodeWriteBegin, decodeWriteEnd);
+                double decodeMs = decodeCoreMs + decodeWriteMs;
                 value.compressedBytes = fs::file_size(archive);
                 value.preprocessMs += preprocessMs;
                 value.secondaryMs += secondaryMs;
                 value.encodeMs += encodeMs;
+                value.decodeCoreMs += decodeCoreMs;
+                value.decodeWriteMs += decodeWriteMs;
                 value.decodeMs += decodeMs;
 
                 raw << Csv(relative.generic_string()) << ',' << samplePercent
@@ -242,7 +246,8 @@ int main(int argc, char* argv[]) {
                     << (100.0 * value.compressedBytes /
                         value.originalBytes) << ','
                     << std::setprecision(3) << preprocessMs << ','
-                    << secondaryMs << ',' << encodeMs << ',' << decodeMs
+                    << secondaryMs << ',' << encodeMs << ',' << decodeCoreMs
+                    << ',' << decodeWriteMs << ',' << decodeMs
                     << ',' << (verified ? "true" : "false") << '\n';
                 raw.flush();
                 fs::remove_all(runDir, ec);
@@ -257,6 +262,8 @@ int main(int argc, char* argv[]) {
             value.preprocessMs /= runs;
             value.secondaryMs /= runs;
             value.encodeMs /= runs;
+            value.decodeCoreMs /= runs;
+            value.decodeWriteMs /= runs;
             value.decodeMs /= runs;
             value.scanlineSelections =
                 selectedMethods[sampleIndex] == 0 ? 1 : 0;
@@ -275,6 +282,7 @@ int main(int argc, char* argv[]) {
                         value.originalBytes) << ','
                     << std::setprecision(3) << value.preprocessMs << ','
                     << value.secondaryMs << ',' << value.encodeMs << ','
+                    << value.decodeCoreMs << ',' << value.decodeWriteMs << ','
                     << value.decodeMs << ',' << (matches ? "true" : "false")
                     << ',' << (value.verified ? "true" : "false") << '\n';
 
@@ -284,6 +292,8 @@ int main(int argc, char* argv[]) {
             aggregate.preprocessMs += value.preprocessMs;
             aggregate.secondaryMs += value.secondaryMs;
             aggregate.encodeMs += value.encodeMs;
+            aggregate.decodeCoreMs += value.decodeCoreMs;
+            aggregate.decodeWriteMs += value.decodeWriteMs;
             aggregate.decodeMs += value.decodeMs;
             aggregate.scanlineSelections += value.scanlineSelections;
             aggregate.zOrderSelections += value.zOrderSelections;
@@ -305,6 +315,7 @@ int main(int argc, char* argv[]) {
                   value.compressedBytes) << ','
               << std::setprecision(3) << value.preprocessMs << ','
               << value.secondaryMs << ',' << value.encodeMs << ','
+              << value.decodeCoreMs << ',' << value.decodeWriteMs << ','
               << value.decodeMs << ','
               << (value.verified ? "true" : "false") << '\n';
     }
