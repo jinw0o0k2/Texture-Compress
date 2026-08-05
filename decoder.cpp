@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "PackedLz4.hpp"
 #include "ScanAlgorithms.hpp"
 
 using namespace std;
@@ -83,9 +84,9 @@ bool FindExtractedBin(const fs::path& directory, fs::path& binPath) {
     return false;
 }
 
-bool RestoreOurPreprocessedBin(const fs::path& binPath, const fs::path& outputPath) {
-    vector<uint8_t> buffer;
-    if (!ReadWholeFile(binPath, buffer) || buffer.size() <= 129) return false;
+bool RestoreOurPreprocessedData(const vector<uint8_t>& buffer,
+                                const fs::path& outputPath) {
+    if (buffer.size() <= 129) return false;
 
     uint8_t header[128];
     memcpy(header, buffer.data(), sizeof(header));
@@ -218,11 +219,23 @@ bool RestoreOurPreprocessedBin(const fs::path& binPath, const fs::path& outputPa
     return !ec && WriteWholeFile(outputPath, outBuf.get(), outOffset);
 }
 
+bool RestoreOurPreprocessedBin(const fs::path& binPath,
+                               const fs::path& outputPath) {
+    vector<uint8_t> buffer;
+    return ReadWholeFile(binPath, buffer) &&
+           RestoreOurPreprocessedData(buffer, outputPath);
+}
+
 string RemovePackedExtension(string filename) {
     const string zipSuffix = ".packed.zip";
     const string sevenZipSuffix = ".packed.7z";
+    const string lz4Suffix = ".packed.lz4";
 
-    if (filename.size() >= zipSuffix.size() &&
+    if (filename.size() >= lz4Suffix.size() &&
+        filename.compare(filename.size() - lz4Suffix.size(),
+                         lz4Suffix.size(), lz4Suffix) == 0) {
+        filename.erase(filename.size() - lz4Suffix.size());
+    } else if (filename.size() >= zipSuffix.size() &&
         filename.compare(filename.size() - zipSuffix.size(), zipSuffix.size(), zipSuffix) == 0) {
         filename.erase(filename.size() - zipSuffix.size());
     } else if (filename.size() >= sevenZipSuffix.size() &&
@@ -238,11 +251,14 @@ bool IsPackedArchive(const fs::path& path) {
     string name = path.filename().string();
     const string zipSuffix = ".packed.zip";
     const string sevenZipSuffix = ".packed.7z";
+    const string lz4Suffix = ".packed.lz4";
     bool isZip = name.size() >= zipSuffix.size() &&
                  name.compare(name.size() - zipSuffix.size(), zipSuffix.size(), zipSuffix) == 0;
     bool is7z = name.size() >= sevenZipSuffix.size() &&
-                name.compare(name.size() - sevenZipSuffix.size(), sevenZipSuffix.size(), sevenZipSuffix) == 0;
-    return isZip || is7z;
+                 name.compare(name.size() - sevenZipSuffix.size(), sevenZipSuffix.size(), sevenZipSuffix) == 0;
+    bool isLz4 = name.size() >= lz4Suffix.size() &&
+                 name.compare(name.size() - lz4Suffix.size(), lz4Suffix.size(), lz4Suffix) == 0;
+    return isZip || is7z || isLz4;
 }
 
 bool DecodeFile(const fs::path& archivePath,
@@ -251,20 +267,27 @@ bool DecodeFile(const fs::path& archivePath,
     fs::path outputPath = outputRoot / relativePath.parent_path() /
                           RemovePackedExtension(relativePath.filename().string());
 
-    auto uniqueValue = chrono::high_resolution_clock::now().time_since_epoch().count();
-    fs::path tempDir = fs::temp_directory_path() /
-                       ("ourcompress_decode_" + to_string(uniqueValue));
-
     bool ok = false;
-    if (ExtractArchive(archivePath, tempDir)) {
-        fs::path binPath;
-        if (FindExtractedBin(tempDir, binPath)) {
-            ok = RestoreOurPreprocessedBin(binPath, outputPath);
+    if (archivePath.extension() == ".lz4") {
+        vector<uint8_t> packed;
+        vector<uint8_t> prepared;
+        ok = ReadWholeFile(archivePath, packed) &&
+             PackedLz4::Decompress(packed, prepared) &&
+             RestoreOurPreprocessedData(prepared, outputPath);
+    } else {
+        auto uniqueValue = chrono::high_resolution_clock::now()
+                               .time_since_epoch().count();
+        fs::path tempDir = fs::temp_directory_path() /
+                           ("ourcompress_decode_" + to_string(uniqueValue));
+        if (ExtractArchive(archivePath, tempDir)) {
+            fs::path binPath;
+            if (FindExtractedBin(tempDir, binPath)) {
+                ok = RestoreOurPreprocessedBin(binPath, outputPath);
+            }
         }
+        error_code ec;
+        fs::remove_all(tempDir, ec);
     }
-
-    error_code ec;
-    fs::remove_all(tempDir, ec);
 
     if (ok) {
         cout << "Decoded: " << archivePath.string()
@@ -287,10 +310,6 @@ int main(int argc, char* argv[]) {
 
     if (!fs::exists(inputPath)) {
         cerr << "Input does not exist: " << inputPath.string() << '\n';
-        return 1;
-    }
-    if (!fs::exists("C:\\Program Files\\7-Zip\\7z.exe")) {
-        cerr << "7-Zip was not found at C:\\Program Files\\7-Zip\\7z.exe\n";
         return 1;
     }
 

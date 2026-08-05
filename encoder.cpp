@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lz4.h"
+#include "PackedLz4.hpp"
 #include "ScanAlgorithms.hpp"
 
 using namespace std;
@@ -25,7 +26,7 @@ struct BlockData {
 static string exe7z = "C:\\Program Files\\7-Zip\\7z.exe";
 static string exePigz = "pigz";
 static int compressionLevel = 7;
-static string archiveMode = "pigz";
+static string archiveMode = "lz4";
 static int requestedOrderMethod = -1;
 static int simulationSamplePercent = 20;
 
@@ -65,13 +66,13 @@ bool WriteWholeFile(const fs::path& path, const uint8_t* data, size_t size) {
     return written == size;
 }
 
-bool BuildOurPreprocessedBin(const fs::path& inputPath,
-                             const fs::path& outputBinPath,
-                             int& bestMethod,
-                             int forcedMethod = -1,
-                             vector<long>* simulatedSizes = nullptr,
-                             unsigned candidateMask = 0x7U,
-                             int samplePercent = 100) {
+bool BuildOurPreprocessedData(const fs::path& inputPath,
+                              vector<uint8_t>& finalData,
+                              int& bestMethod,
+                              int forcedMethod,
+                              vector<long>* simulatedSizes,
+                              unsigned candidateMask,
+                              int samplePercent) {
     vector<uint8_t> originBuffer;
     if (!ReadWholeFile(inputPath, originBuffer) || originBuffer.size() <= 128) {
         return false;
@@ -264,36 +265,53 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
     const vector<BlockData>& finalBlocks =
         bestMethod == 2 ? zOrderBlocks : blocks;
 
-    unique_ptr<uint8_t[]> finalBuf(new uint8_t[128 + 1 + totalBufferSize]);
+    finalData.resize(128 + 1 + totalBufferSize);
     size_t finalOffset = 0;
-    memcpy(finalBuf.get() + finalOffset, header, 128);
+    memcpy(finalData.data() + finalOffset, header, 128);
     finalOffset += 128;
-    finalBuf[finalOffset++] = static_cast<uint8_t>(bestMethod);
+    finalData[finalOffset++] = static_cast<uint8_t>(bestMethod);
 
     if (isBC3 || isBC4) {
         for (const auto& b : finalBlocks) {
-            finalBuf[finalOffset++] = b.a0;
-            finalBuf[finalOffset++] = b.a1;
+            finalData[finalOffset++] = b.a0;
+            finalData[finalOffset++] = b.a1;
         }
         for (const auto& b : finalBlocks) {
-            memcpy(finalBuf.get() + finalOffset, &b.a_idx, 6);
+            memcpy(finalData.data() + finalOffset, &b.a_idx, 6);
             finalOffset += 6;
         }
     }
     if (!isBC4) {
         for (const auto& b : finalBlocks) {
-            memcpy(finalBuf.get() + finalOffset, &b.c0, 2);
+            memcpy(finalData.data() + finalOffset, &b.c0, 2);
             finalOffset += 2;
-            memcpy(finalBuf.get() + finalOffset, &b.c1, 2);
+            memcpy(finalData.data() + finalOffset, &b.c1, 2);
             finalOffset += 2;
         }
         for (const auto& b : finalBlocks) {
-            memcpy(finalBuf.get() + finalOffset, &b.c_idx, 4);
+            memcpy(finalData.data() + finalOffset, &b.c_idx, 4);
             finalOffset += 4;
         }
     }
 
-    return WriteWholeFile(outputBinPath, finalBuf.get(), finalOffset);
+    return finalOffset == finalData.size();
+}
+
+bool BuildOurPreprocessedBin(const fs::path& inputPath,
+                             const fs::path& outputBinPath,
+                             int& bestMethod,
+                             int forcedMethod = -1,
+                             vector<long>* simulatedSizes = nullptr,
+                             unsigned candidateMask = 0x7U,
+                             int samplePercent = 100) {
+    vector<uint8_t> finalData;
+    if (!BuildOurPreprocessedData(
+            inputPath, finalData, bestMethod, forcedMethod,
+            simulatedSizes, candidateMask, samplePercent)) {
+        return false;
+    }
+    return WriteWholeFile(
+        outputBinPath, finalData.data(), finalData.size());
 }
 
 bool ConfigurePigz(const fs::path& programPath) {
@@ -348,6 +366,15 @@ bool CompressWithPigz(const fs::path& inputBin, const fs::path& archivePath) {
 }
 
 bool CompressPreparedBin(const fs::path& inputBin, const fs::path& archivePath) {
+    if (archiveMode == "lz4") {
+        vector<uint8_t> prepared;
+        vector<uint8_t> packed;
+        if (!ReadWholeFile(inputBin, prepared) ||
+            !PackedLz4::Compress(prepared, packed)) {
+            return false;
+        }
+        return WriteWholeFile(archivePath, packed.data(), packed.size());
+    }
     if (archiveMode != "7z") return CompressWithPigz(inputBin, archivePath);
 
     error_code ec;
@@ -363,7 +390,10 @@ bool CompressPreparedBin(const fs::path& inputBin, const fs::path& archivePath) 
 bool EncodeFile(const fs::path& inputPath,
                 const fs::path& outputRoot,
                 const fs::path& relativePath) {
-    string extension = archiveMode == "7z" ? ".packed.7z" : ".packed.zip";
+    string extension = archiveMode == "lz4"
+                           ? ".packed.lz4"
+                           : (archiveMode == "7z" ? ".packed.7z"
+                                                   : ".packed.zip");
     fs::path archivePath = outputRoot / relativePath;
     archivePath += extension;
 
@@ -371,19 +401,27 @@ bool EncodeFile(const fs::path& inputPath,
     fs::create_directories(archivePath.parent_path(), ec);
     if (ec) return false;
 
-    fs::path tempBin = archivePath;
-    tempBin += ".tmp.bin";
-
     int bestMethod = 0;
-    if (!BuildOurPreprocessedBin(inputPath, tempBin, bestMethod,
-                                 requestedOrderMethod, nullptr, 0x5U,
-                                 simulationSamplePercent)) {
+    bool ok = false;
+    if (archiveMode == "lz4") {
+        vector<uint8_t> prepared;
+        vector<uint8_t> packed;
+        ok = BuildOurPreprocessedData(
+                 inputPath, prepared, bestMethod,
+                 requestedOrderMethod, nullptr, 0x5U,
+                 simulationSamplePercent) &&
+             PackedLz4::Compress(prepared, packed) &&
+             WriteWholeFile(archivePath, packed.data(), packed.size());
+    } else {
+        fs::path tempBin = archivePath;
+        tempBin += ".tmp.bin";
+        ok = BuildOurPreprocessedBin(
+                 inputPath, tempBin, bestMethod,
+                 requestedOrderMethod, nullptr, 0x5U,
+                 simulationSamplePercent) &&
+             CompressPreparedBin(tempBin, archivePath);
         fs::remove(tempBin, ec);
-        return false;
     }
-
-    bool ok = CompressPreparedBin(tempBin, archivePath);
-    fs::remove(tempBin, ec);
 
     if (ok) {
         cout << "Encoded: " << inputPath.string()
@@ -396,7 +434,7 @@ bool EncodeFile(const fs::path& inputPath,
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         cout << "Usage: " << argv[0]
-             << " <input.dds|folder> [output_folder] [pigz|7z] [level=7]"
+             << " <input.dds|folder> [output_folder] [lz4|pigz|7z] [level=7]"
                 " [auto|scanline|zorder] [sample=20|10|100]\n";
         return 1;
     }
@@ -409,8 +447,9 @@ int main(int argc, char* argv[]) {
     if (argc >= 4) {
         archiveMode = argv[3];
         if (archiveMode == "zip") archiveMode = "pigz"; // Backward-compatible alias.
-        if (archiveMode != "pigz" && archiveMode != "7z") {
-            cerr << "Archive mode must be pigz or 7z.\n";
+        if (archiveMode != "lz4" && archiveMode != "pigz" &&
+            archiveMode != "7z") {
+            cerr << "Archive mode must be lz4, pigz, or 7z.\n";
             return 1;
         }
     }

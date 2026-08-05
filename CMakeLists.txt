@@ -27,6 +27,7 @@ target_link_libraries(
     encoder PRIVATE lz4_static Threads::Threads)
 
 add_executable(decoder decoder.cpp)
+target_link_libraries(decoder PRIVATE lz4_static)
 
 add_executable(overhead_benchmark overhead_benchmark.cpp)
 target_link_libraries(

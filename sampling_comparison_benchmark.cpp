@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 6) {
         std::cout << "Usage: " << argv[0]
                   << " <input.dds|folder> [output_dir=sampling_comparison]"
-                     " [pigz_level=7] [runs=5] [decoder.exe]\n";
+                     " [legacy_level=7] [runs=5] [decoder.exe]\n";
         return 1;
     }
 
@@ -96,7 +96,7 @@ int main(int argc, char* argv[]) {
         if (argc >= 4) level = std::stoi(argv[3]);
         if (argc >= 5) runs = std::stoi(argv[4]);
     } catch (...) {
-        std::cerr << "pigz level and runs must be integers.\n";
+        std::cerr << "legacy level and runs must be integers.\n";
         return 1;
     }
     fs::path programDir = fs::absolute(argv[0]).parent_path();
@@ -104,11 +104,7 @@ int main(int argc, char* argv[]) {
                                  : programDir / "decoder.exe";
     if (!fs::exists(input) || !fs::exists(decoder) ||
         (level != 7 && level != 8 && level != 9) || runs < 1) {
-        std::cerr << "Invalid input, decoder, pigz level, or run count.\n";
-        return 1;
-    }
-    if (!ConfigurePigz(argv[0])) {
-        std::cerr << "pigz was not found.\n";
+        std::cerr << "Invalid input, decoder, level, or run count.\n";
         return 1;
     }
 
@@ -128,20 +124,20 @@ int main(int argc, char* argv[]) {
     std::ofstream total(output / "sampling_total.csv");
     if (!raw || !perFile || !total) return 1;
 
-    raw << "file,sample_percent,simulation_engine,run,selected_method,original_bytes,"
+    raw << "file,sample_percent,simulation_engine,archive_codec,run,selected_method,original_bytes,"
            "compressed_bytes,compressed_percent,preprocess_ms,secondary_ms,"
            "total_encode_ms,total_decode_ms,verified\n";
-    perFile << "file,sample_percent,simulation_engine,runs,selected_method,original_bytes,"
+    perFile << "file,sample_percent,simulation_engine,archive_codec,runs,selected_method,original_bytes,"
                "compressed_bytes,compressed_percent,preprocess_avg_ms,"
                "secondary_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
                "matches_100_percent,all_verified\n";
-    total << "sample_percent,simulation_engine,files,runs,scanline_selections,zorder_selections,"
+    total << "sample_percent,simulation_engine,archive_codec,files,runs,scanline_selections,zorder_selections,"
              "matches_100_percent,original_bytes,compressed_bytes,"
              "compressed_percent,ratio,preprocess_total_avg_ms,"
              "secondary_total_avg_ms,total_encode_avg_ms,total_decode_avg_ms,"
              "all_verified\n";
 
-    archiveMode = "pigz";
+    archiveMode = "lz4";
     compressionLevel = level;
     std::map<int, Aggregate> totals;
     std::map<int, int> matches100;
@@ -179,13 +175,13 @@ int main(int argc, char* argv[]) {
                 fs::create_directories(decodeDir, ec);
                 if (ec) return 2;
                 fs::path archive =
-                    runDir / (source.filename().string() + ".packed.zip");
-                fs::path prepared = archive;
-                prepared += ".tmp.bin";
+                    runDir / (source.filename().string() + ".packed.lz4");
+                vector<uint8_t> prepared;
+                vector<uint8_t> packed;
 
                 int selectedMethod = -1;
                 auto preprocessBegin = Clock::now();
-                bool built = BuildOurPreprocessedBin(
+                bool built = BuildOurPreprocessedData(
                     source, prepared, selectedMethod, -1, nullptr, 0x5U,
                     samplePercent);
                 auto preprocessEnd = Clock::now();
@@ -199,16 +195,26 @@ int main(int argc, char* argv[]) {
                 }
 
                 auto secondaryBegin = Clock::now();
-                bool compressed = CompressPreparedBin(prepared, archive);
+                bool compressed =
+                    PackedLz4::Compress(prepared, packed) &&
+                    WriteWholeFile(archive, packed.data(), packed.size());
                 auto secondaryEnd = Clock::now();
                 if (!compressed) return 2;
 
                 std::string command = Quote(decoder.string()) + " " +
                                       Quote(archive.string()) + " " +
-                                      Quote(decodeDir.string()) +
-                                      " > NUL 2>&1";
+                                      Quote(decodeDir.string());
+#ifdef _WIN32
+                command += " > NUL 2>&1";
+#else
+                command += " > /dev/null 2>&1";
+#endif
                 auto decodeBegin = Clock::now();
+#ifdef _WIN32
                 int decodeResult = system(("\"" + command + "\"").c_str());
+#else
+                int decodeResult = system(command.c_str());
+#endif
                 auto decodeEnd = Clock::now();
 
                 fs::path restored = decodeDir / source.filename();
@@ -229,7 +235,7 @@ int main(int argc, char* argv[]) {
                 value.decodeMs += decodeMs;
 
                 raw << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default," << run << ',' << OrderMethodName(selectedMethod)
+                    << ",LZ4-default,LZ4-default," << run << ',' << OrderMethodName(selectedMethod)
                     << ',' << value.originalBytes << ','
                     << value.compressedBytes << ','
                     << std::fixed << std::setprecision(6)
@@ -261,7 +267,7 @@ int main(int argc, char* argv[]) {
             if (matches) ++matches100[samplePercent];
 
             perFile << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default," << runs << ','
+                    << ",LZ4-default,LZ4-default," << runs << ','
                     << OrderMethodName(selectedMethods[sampleIndex]) << ','
                     << value.originalBytes << ',' << value.compressedBytes
                     << ',' << std::fixed << std::setprecision(6)
@@ -288,7 +294,8 @@ int main(int argc, char* argv[]) {
 
     for (int samplePercent : kSamples) {
         const Aggregate& value = totals.at(samplePercent);
-        total << samplePercent << ",LZ4-default," << files.size() << ',' << runs << ','
+        total << samplePercent << ",LZ4-default,LZ4-default,"
+              << files.size() << ',' << runs << ','
               << value.scanlineSelections << ',' << value.zOrderSelections
               << ',' << matches100[samplePercent] << ','
               << value.originalBytes << ',' << value.compressedBytes << ','
@@ -308,6 +315,7 @@ int main(int argc, char* argv[]) {
         verified = verified && totals[samplePercent].verified;
     }
     std::cout << "Simulation engine: LZ4-default\n"
+              << "Archive codec: LZ4-default (in-process)\n"
               << "Completed sampling comparison. Verified: "
               << (verified ? "true" : "false") << '\n';
     return verified ? 0 : 3;

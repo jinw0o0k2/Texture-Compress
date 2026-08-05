@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
         std::cout
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
-               " [pigz_level=7] [runs=5] [decoder.exe]"
+               " [legacy_level=7] [runs=5] [decoder.exe]"
                " [sample=20]\n";
         return 1;
     }
@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
         if (argc >= 5) runs = std::stoi(argv[4]);
         if (argc >= 7) samplePercent = std::stoi(argv[6]);
     } catch (...) {
-        std::cerr << "pigz_level, runs, and sample must be integers.\n";
+        std::cerr << "legacy_level, runs, and sample must be integers.\n";
         return 1;
     }
     fs::path programDir = fs::absolute(argv[0]).parent_path();
@@ -131,12 +131,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Decoder not found: " << decoderExe.string() << '\n';
         return 1;
     }
-    if (!ConfigurePigz(argv[0])) {
-        std::cerr << "pigz was not found. Put pigz.exe beside the benchmark, add it to PATH,\n"
-                     "or set PIGZ_EXE to its full path.\n";
-        return 1;
-    }
-
     std::vector<fs::path> files = CollectDdsFiles(input);
     if (files.empty()) {
         std::cerr << "No DDS files found.\n";
@@ -167,16 +161,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    raw << "file,run,pigz_level,sample_percent,simulation_engine,"
+    raw << "file,run,legacy_level,archive_codec,sample_percent,simulation_engine,"
            "original_bytes,prepared_bytes,compressed_bytes,"
            "scan_method,preprocess_ms,secondary_compress_ms,total_encode_ms,"
            "total_decode_ms,verified\n";
-    summary << "file,runs,pigz_level,sample_percent,simulation_engine,"
+    summary << "file,runs,legacy_level,archive_codec,sample_percent,simulation_engine,"
                "original_bytes,compressed_bytes,ratio,"
                "preprocess_avg_ms,secondary_compress_avg_ms,total_encode_avg_ms,"
                "total_decode_avg_ms,all_verified\n";
 
-    archiveMode = "pigz";
+    archiveMode = "lz4";
     compressionLevel = level;
     std::vector<FileAverage> averages;
     bool allVerified = true;
@@ -204,13 +198,14 @@ int main(int argc, char* argv[]) {
             fs::create_directories(decodeDir, ec);
             if (ec) return 2;
 
-            fs::path archive = runDir / (source.filename().string() + ".packed.zip");
-            fs::path prepared = archive;
-            prepared += ".tmp.bin";
+            fs::path archive = runDir /
+                               (source.filename().string() + ".packed.lz4");
             int bestMethod = 0;
+            vector<uint8_t> prepared;
+            vector<uint8_t> packed;
 
             auto preprocessBegin = Clock::now();
-            bool preparedOk = BuildOurPreprocessedBin(
+            bool preparedOk = BuildOurPreprocessedData(
                 source, prepared, bestMethod, -1, nullptr, 0x5U,
                 samplePercent);
             auto preprocessEnd = Clock::now();
@@ -220,18 +215,29 @@ int main(int argc, char* argv[]) {
             }
 
             auto secondaryBegin = Clock::now();
-            bool compressedOk = CompressPreparedBin(prepared, archive);
+            bool compressedOk =
+                PackedLz4::Compress(prepared, packed) &&
+                WriteWholeFile(archive, packed.data(), packed.size());
             auto secondaryEnd = Clock::now();
             if (!compressedOk) {
-                std::cerr << "pigz compression failed: " << source.string() << '\n';
+                std::cerr << "LZ4 compression failed: " << source.string() << '\n';
                 return 2;
             }
 
             std::string decodeCommand = Quote(decoderExe.string()) + " " +
                                         Quote(archive.string()) + " " +
-                                        Quote(decodeDir.string()) + " > NUL 2>&1";
+                                        Quote(decodeDir.string());
+#ifdef _WIN32
+            decodeCommand += " > NUL 2>&1";
+#else
+            decodeCommand += " > /dev/null 2>&1";
+#endif
             auto decodeBegin = Clock::now();
+#ifdef _WIN32
             int decodeResult = system(("\"" + decodeCommand + "\"").c_str());
+#else
+            int decodeResult = system(decodeCommand.c_str());
+#endif
             auto decodeEnd = Clock::now();
 
             fs::path restored = decodeDir / source.filename();
@@ -249,9 +255,9 @@ int main(int argc, char* argv[]) {
             average.totalEncodeMs += totalEncodeMs;
             average.totalDecodeMs += decodeMs;
 
-            raw << Csv(average.relativePath) << ',' << run << ',' << level << ','
-                << samplePercent << ",LZ4-default,"
-                << average.originalBytes << ',' << fs::file_size(prepared) << ','
+            raw << Csv(average.relativePath) << ',' << run << ',' << level
+                << ",LZ4-default," << samplePercent << ",LZ4-default,"
+                << average.originalBytes << ',' << prepared.size() << ','
                 << average.compressedBytes << ','
                 << OrderMethodName(bestMethod) << ','
                 << std::fixed << std::setprecision(3)
@@ -268,8 +274,8 @@ int main(int argc, char* argv[]) {
         average.totalDecodeMs /= runs;
         averages.push_back(average);
 
-        summary << Csv(average.relativePath) << ',' << runs << ',' << level << ','
-                << samplePercent << ",LZ4-default,"
+        summary << Csv(average.relativePath) << ',' << runs << ',' << level
+                << ",LZ4-default," << samplePercent << ",LZ4-default,"
                 << average.originalBytes << ',' << average.compressedBytes << ','
                 << std::fixed << std::setprecision(6)
                 << static_cast<double>(average.originalBytes) / average.compressedBytes << ','
@@ -299,7 +305,7 @@ int main(int argc, char* argv[]) {
     std::cout << std::fixed << std::setprecision(3)
               << "Files: " << averages.size() << '\n'
               << "Runs per file: " << runs << '\n'
-              << "pigz level: " << level << '\n'
+              << "Archive codec: LZ4-default\n"
               << "Sample: " << samplePercent << "%\n"
               << "Simulation engine: LZ4-default\n"
               << "Preprocess total average: " << preprocessTotal << " ms\n"
