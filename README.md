@@ -58,6 +58,8 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
 - [Zstandard v1.5.7](https://github.com/facebook/zstd/releases/tag/v1.5.7)
   - 선택적인 Zstd 최종 압축·복원에 사용합니다.
   - 정적으로 연결하므로 실행 시 `zstd.exe`가 필요하지 않습니다.
+  - 압축 시 CPU 논리 코어 수를 자동 감지하여 `ZSTD_c_nbWorkers`에 설정합니다.
+    CSV의 `archive_codec`에는 예를 들어 `Zstd-1-MT16`처럼 기록됩니다.
 - pigz (레거시 `pigz` 모드에서만 필요)
   - `pigz.exe`를 실행 파일 옆에 두거나 `PATH`에 추가합니다.
   - 또는 `PIGZ_EXE` 환경 변수에 전체 경로를 지정합니다.

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <vector>
 
 #include "zstd.h"
@@ -28,6 +29,16 @@ inline std::uint64_t ReadU64Le(const std::uint8_t* in) {
     return value;
 }
 
+inline int DefaultWorkerCount() {
+    const unsigned detected = std::thread::hardware_concurrency();
+    return static_cast<int>(detected == 0 ? 1 : detected);
+}
+
+struct ContextHolder {
+    ZSTD_CCtx* context = ZSTD_createCCtx();
+    ~ContextHolder() { ZSTD_freeCCtx(context); }
+};
+
 inline bool Compress(const std::vector<std::uint8_t>& input,
                      std::vector<std::uint8_t>& output,
                      int level) {
@@ -38,9 +49,28 @@ inline bool Compress(const std::vector<std::uint8_t>& input,
     output.resize(kHeaderSize + bound);
     std::memcpy(output.data(), kMagic, sizeof(kMagic));
     WriteU64Le(output.data() + 8, input.size());
-    const std::size_t compressedSize = ZSTD_compress(
-        output.data() + kHeaderSize, bound,
-        input.data(), input.size(), level);
+    thread_local ContextHolder holder;
+    ZSTD_CCtx* context = holder.context;
+    if (!context) {
+        output.clear();
+        return false;
+    }
+    std::size_t result = ZSTD_CCtx_reset(
+        context, ZSTD_reset_session_and_parameters);
+    if (!ZSTD_isError(result)) {
+        result = ZSTD_CCtx_setParameter(
+        context, ZSTD_c_compressionLevel, level);
+    }
+    if (!ZSTD_isError(result)) {
+        result = ZSTD_CCtx_setParameter(
+            context, ZSTD_c_nbWorkers, DefaultWorkerCount());
+    }
+    std::size_t compressedSize = result;
+    if (!ZSTD_isError(result)) {
+        compressedSize = ZSTD_compress2(
+            context, output.data() + kHeaderSize, bound,
+            input.data(), input.size());
+    }
     if (ZSTD_isError(compressedSize)) {
         output.clear();
         return false;

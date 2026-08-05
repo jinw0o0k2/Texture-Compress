@@ -46,7 +46,10 @@ string ArchiveExtension(const string& mode) {
 string ArchiveCodecLabel(const string& mode, int level) {
     if (mode == "lz4") return "LZ4-default";
     if (mode == "lz4hc") return "LZ4HC-" + to_string(level);
-    if (mode == "zstd") return "Zstd-" + to_string(level);
+    if (mode == "zstd") {
+        return "Zstd-" + to_string(level) + "-MT" +
+               to_string(PackedZstd::DefaultWorkerCount());
+    }
     return mode;
 }
 
