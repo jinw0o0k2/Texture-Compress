@@ -1,7 +1,7 @@
 # Texture Compress
 
 DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 분리한 뒤,
-인프로세스 LZ4로 2차 압축하는 C++ 인코더/디코더입니다. 기존 실험과의
+인프로세스 LZ4, LZ4HC 또는 Zstandard로 2차 압축하는 C++ 인코더/디코더입니다. 기존 실험과의
 호환을 위해 외부 pigz ZIP 및 7Z 인코딩 경로도 선택적으로 남겨 두었습니다.
 
 압축파일 내부에는 일반 DDS가 아니라 전처리된 BIN 데이터가 들어 있으므로
@@ -20,8 +20,9 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
 4. 조건을 만족하면 전체 블록에서 균일하게 추출한 20% 샘플을
    LZ4 default로 압축하여 Scanline과 Z-order를 비교합니다.
 5. 더 작은 후보를 선택하고 전체 블록을 해당 순서로 배치합니다.
-6. 전처리 데이터를 파일로 왕복시키지 않고 같은 프로세스 안에서 LZ4로
-   압축하여 `.packed.lz4`로 저장합니다.
+6. 전처리 데이터를 파일로 왕복시키지 않고 선택한 코덱으로 같은 프로세스
+   안에서 압축합니다. 출력은 `.packed.lz4`, `.packed.lz4hc` 또는
+   `.packed.zst`입니다.
 
 기본 샘플 비율은 20%이며 CLI에서 10% 또는 100%로 변경할 수 있습니다.
 
@@ -41,7 +42,8 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
 ## 파일
 
 - `encoder.cpp`: DDS 파일 또는 폴더를 인코딩합니다.
-- `decoder.cpp`: `.packed.lz4`, `.packed.zip`, `.packed.7z`를 DDS로 복원합니다.
+- `decoder.cpp`: `.packed.lz4`, `.packed.lz4hc`, `.packed.zst`와 레거시
+  `.packed.zip`, `.packed.7z`를 DDS로 복원합니다.
 - `ScanAlgorithms.hpp`: Scanline, Hilbert 호환, Z-order 및 LUT 구현입니다.
 - `overhead_benchmark.cpp`: 인코딩·디코딩 시간과 압축률을 기본 5회 측정합니다.
 - `sampling_comparison_benchmark.cpp`: 100%·20%·10% 샘플링을 비교합니다.
@@ -53,6 +55,9 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
 - [LZ4 v1.10.0](https://github.com/lz4/lz4/releases/tag/v1.10.0)
   - 후보 크기 비교와 기본 최종 압축·복원에 모두 사용합니다.
   - CMake가 정적 라이브러리로 연결하므로 실행 시 `lz4.exe`가 필요하지 않습니다.
+- [Zstandard v1.5.7](https://github.com/facebook/zstd/releases/tag/v1.5.7)
+  - 선택적인 Zstd 최종 압축·복원에 사용합니다.
+  - 정적으로 연결하므로 실행 시 `zstd.exe`가 필요하지 않습니다.
 - pigz (레거시 `pigz` 모드에서만 필요)
   - `pigz.exe`를 실행 파일 옆에 두거나 `PATH`에 추가합니다.
   - 또는 `PIGZ_EXE` 환경 변수에 전체 경로를 지정합니다.
@@ -62,8 +67,9 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
 
 ## 빌드
 
-저장소의 `CMakeLists.txt`가 공식 LZ4 v1.10.0을 자동으로 받아 정적
-라이브러리로 연결합니다. 최초 구성에는 인터넷 연결과 Git이 필요합니다.
+저장소의 `CMakeLists.txt`가 공식 LZ4 v1.10.0과 Zstandard v1.5.7을
+자동으로 받아 정적 라이브러리로 연결합니다. 최초 구성에는 인터넷 연결과
+Git이 필요합니다.
 
 ```bat
 cmake -S . -B build
@@ -84,33 +90,40 @@ cmake --build build --config Release
 ## 인코더 사용법
 
 ```text
-encoder.exe <input.dds|folder> [output_folder] [lz4|pigz|7z] [level=7] [auto|scanline|zorder] [sample=20|10|100]
+encoder.exe <input.dds|folder> [output_folder] [lz4|lz4hc|zstd|pigz|7z] [level] [auto|scanline|zorder] [sample=20|10|100]
 ```
 
 기본 설정으로 폴더 전체 인코딩:
 
 ```bat
-encoder.exe "C:\Textures" "C:\Encoded" lz4 7 auto 20
+encoder.exe "C:\Textures" "C:\Encoded" lz4 0 auto 20
 ```
 
 100% 후보 시뮬레이션:
 
 ```bat
-encoder.exe "C:\Textures" "C:\Encoded" lz4 7 auto 100
+encoder.exe "C:\Textures" "C:\Encoded" lz4 0 auto 100
 ```
 
 Z-order 강제:
 
 ```bat
-encoder.exe "C:\Textures\texture.dds" "C:\Encoded" lz4 7 zorder 20
+encoder.exe "C:\Textures\texture.dds" "C:\Encoded" lz4 0 zorder 20
 ```
 
 Z-order 조건을 만족하지 않는 DDS에서는 `zorder`를 지정해도 안전을 위해
 Scanline으로 처리합니다.
 
-기본 모드는 `lz4`입니다. 이 모드에서 level 인자는 호환성 때문에 받지만
-LZ4 압축 설정에는 사용하지 않습니다. pigz 레벨은 `7`, `8`, `9`를
-지원하며 기존 명령과의 호환을 위해 `zip`은 `pigz`의 별칭으로 처리됩니다.
+기본 모드는 `lz4`입니다. LZ4 default의 level 값은 사용하지 않습니다.
+LZ4HC 기본 level은 `3`, Zstd 기본 level은 `1`이며 CLI에서 변경할 수
+있습니다. LZ4HC는 `3`부터 `12`까지 지원합니다. pigz 레벨은 `7`, `8`,
+`9`를 지원하며 기존 명령과의 호환을 위해 `zip`은 `pigz`의 별칭입니다.
+
+```bat
+encoder.exe "C:\Textures" "C:\EncodedLz4" lz4 0 auto 10
+encoder.exe "C:\Textures" "C:\EncodedLz4hc" lz4hc 3 auto 10
+encoder.exe "C:\Textures" "C:\EncodedZstd" zstd 1 auto 10
+```
 
 ## 디코더 사용법
 
@@ -135,21 +148,23 @@ decoder.exe "C:\Encoded\texture.dds.packed.lz4" "C:\Restored"
 ## 오버헤드 측정
 
 ```text
-overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [legacy_level=7] [runs=5] [sample=20]
+overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [lz4|lz4hc|zstd] [level] [runs=5] [sample=20]
 ```
 
 20% 샘플을 파일당 5회 측정:
 
 ```bat
-overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 20
+overhead_benchmark.exe "C:\Textures" "C:\Results\lz4.csv" lz4 0 5 10
+overhead_benchmark.exe "C:\Textures" "C:\Results\lz4hc3.csv" lz4hc 3 5 10
+overhead_benchmark.exe "C:\Textures" "C:\Results\zstd1.csv" zstd 1 5 10
 ```
 
 측정 항목:
 
 - `preprocess_ms`: 적격성 검사, 샘플 후보 비교, LUT 직접 배치 및 BIN 쓰기
-- `secondary_compress_ms`: 전처리 데이터를 인프로세스 LZ4로 압축하고 쓰는 시간
-- `total_encode_ms`: 전처리와 LZ4 압축·쓰기 시간의 합
-- `decode_core_ms`: 별도 프로세스 없이 LZ4 압축 해제와 DDS 메모리 복원 시간
+- `secondary_compress_ms`: 전처리 데이터를 선택한 코덱으로 압축하고 쓰는 시간
+- `total_encode_ms`: 전처리와 최종 압축·쓰기 시간의 합
+- `decode_core_ms`: 별도 프로세스 없이 압축 해제와 DDS 메모리 복원 시간
 - `decode_write_ms`: 복원된 DDS를 파일로 쓰는 시간
 - `total_decode_ms`: `decode_core_ms`와 `decode_write_ms`의 합
 - `compressed_bytes`, `ratio`: 최종 크기와 압축 배율
@@ -161,7 +176,7 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\raw.csv" 7 5 20
 ## 샘플링 비교
 
 ```text
-sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [legacy_level=7] [runs=5]
+sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [lz4|lz4hc|zstd] [level] [runs=5]
 ```
 
 100%·20%·10%를 파일과 회차마다 교차 실행하여 다음 파일을 생성합니다.

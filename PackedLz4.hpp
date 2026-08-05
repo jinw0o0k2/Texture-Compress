@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "lz4.h"
+#include "lz4hc.h"
 
 namespace PackedLz4 {
 
@@ -47,6 +48,35 @@ inline bool Compress(const std::vector<std::uint8_t>& input,
         reinterpret_cast<char*>(output.data() + kHeaderSize),
         sourceSize,
         bound);
+    if (compressedSize <= 0) {
+        output.clear();
+        return false;
+    }
+    WriteU64Le(output.data() + 16,
+               static_cast<std::uint64_t>(compressedSize));
+    output.resize(kHeaderSize + static_cast<std::size_t>(compressedSize));
+    return true;
+}
+
+inline bool CompressHC(const std::vector<std::uint8_t>& input,
+                       std::vector<std::uint8_t>& output,
+                       int level) {
+    if (input.empty() || level < LZ4HC_CLEVEL_MIN ||
+        level > LZ4HC_CLEVEL_MAX ||
+        input.size() > static_cast<std::size_t>(LZ4_MAX_INPUT_SIZE)) {
+        return false;
+    }
+    const int sourceSize = static_cast<int>(input.size());
+    const int bound = LZ4_compressBound(sourceSize);
+    if (bound <= 0) return false;
+
+    output.resize(kHeaderSize + static_cast<std::size_t>(bound));
+    std::memcpy(output.data(), kMagic, sizeof(kMagic));
+    WriteU64Le(output.data() + 8, input.size());
+    const int compressedSize = LZ4_compress_HC(
+        reinterpret_cast<const char*>(input.data()),
+        reinterpret_cast<char*>(output.data() + kHeaderSize),
+        sourceSize, bound, level);
     if (compressedSize <= 0) {
         output.clear();
         return false;

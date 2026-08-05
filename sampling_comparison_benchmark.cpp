@@ -87,24 +87,28 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 6) {
         std::cout << "Usage: " << argv[0]
                   << " <input.dds|folder> [output_dir=sampling_comparison]"
-                     " [legacy_level=7] [runs=5]\n";
+                     " [lz4|lz4hc|zstd] [level] [runs=5]\n";
         return 1;
     }
 
     fs::path input = fs::absolute(argv[1]);
     fs::path output = argc >= 3 ? fs::absolute(argv[2])
                                 : fs::absolute("sampling_comparison");
-    int level = 7;
+    string codec = argc >= 4 ? argv[3] : "lz4";
+    int level = codec == "lz4hc" ? 3 : (codec == "zstd" ? 1 : 0);
     int runs = 5;
     try {
-        if (argc >= 4) level = std::stoi(argv[3]);
-        if (argc >= 5) runs = std::stoi(argv[4]);
+        if (argc >= 5) level = std::stoi(argv[4]);
+        if (argc >= 6) runs = std::stoi(argv[5]);
     } catch (...) {
-        std::cerr << "legacy level and runs must be integers.\n";
+        std::cerr << "level and runs must be integers.\n";
         return 1;
     }
-    if (!fs::exists(input) ||
-        (level != 7 && level != 8 && level != 9) || runs < 1) {
+    if (!fs::exists(input) || !IsInProcessCodec(codec) || runs < 1 ||
+        (codec == "lz4hc" &&
+         (level < LZ4HC_CLEVEL_MIN || level > LZ4HC_CLEVEL_MAX)) ||
+        (codec == "zstd" &&
+         (level < ZSTD_minCLevel() || level > ZSTD_maxCLevel()))) {
         std::cerr << "Invalid input, level, or run count.\n";
         return 1;
     }
@@ -140,8 +144,9 @@ int main(int argc, char* argv[]) {
              "secondary_total_avg_ms,total_encode_avg_ms,decode_core_total_avg_ms,"
              "decode_write_total_avg_ms,total_decode_avg_ms,all_verified\n";
 
-    archiveMode = "lz4";
+    archiveMode = codec;
     compressionLevel = level;
+    const string codecLabel = ArchiveCodecLabel(codec, level);
     std::map<int, Aggregate> totals;
     std::map<int, int> matches100;
 
@@ -178,7 +183,8 @@ int main(int argc, char* argv[]) {
                 fs::create_directories(decodeDir, ec);
                 if (ec) return 2;
                 fs::path archive =
-                    runDir / (source.filename().string() + ".packed.lz4");
+                    runDir / (source.filename().string() +
+                              ArchiveExtension(codec));
                 vector<uint8_t> prepared;
                 vector<uint8_t> packed;
 
@@ -199,7 +205,7 @@ int main(int argc, char* argv[]) {
 
                 auto secondaryBegin = Clock::now();
                 bool compressed =
-                    PackedLz4::Compress(prepared, packed) &&
+                    CompressPreparedData(prepared, packed, codec, level) &&
                     WriteWholeFile(archive, packed.data(), packed.size());
                 auto secondaryEnd = Clock::now();
                 if (!compressed) return 2;
@@ -209,7 +215,8 @@ int main(int argc, char* argv[]) {
                 vector<uint8_t> restoredDds;
                 auto decodeCoreBegin = Clock::now();
                 bool decoded =
-                    PackedLz4::Decompress(packed, decodedPrepared) &&
+                    DecompressPreparedData(
+                        packed, decodedPrepared, codec) &&
                     PreprocessedRestore::ToDds(
                         decodedPrepared, restoredDds);
                 auto decodeCoreEnd = Clock::now();
@@ -239,7 +246,8 @@ int main(int argc, char* argv[]) {
                 value.decodeMs += decodeMs;
 
                 raw << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default,LZ4-default," << run << ',' << OrderMethodName(selectedMethod)
+                    << ",LZ4-default," << codecLabel << ',' << run << ','
+                    << OrderMethodName(selectedMethod)
                     << ',' << value.originalBytes << ','
                     << value.compressedBytes << ','
                     << std::fixed << std::setprecision(6)
@@ -274,7 +282,7 @@ int main(int argc, char* argv[]) {
             if (matches) ++matches100[samplePercent];
 
             perFile << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default,LZ4-default," << runs << ','
+                    << ",LZ4-default," << codecLabel << ',' << runs << ','
                     << OrderMethodName(selectedMethods[sampleIndex]) << ','
                     << value.originalBytes << ',' << value.compressedBytes
                     << ',' << std::fixed << std::setprecision(6)
@@ -304,7 +312,7 @@ int main(int argc, char* argv[]) {
 
     for (int samplePercent : kSamples) {
         const Aggregate& value = totals.at(samplePercent);
-        total << samplePercent << ",LZ4-default,LZ4-default,"
+        total << samplePercent << ",LZ4-default," << codecLabel << ','
               << files.size() << ',' << runs << ','
               << value.scanlineSelections << ',' << value.zOrderSelections
               << ',' << matches100[samplePercent] << ','
@@ -326,7 +334,7 @@ int main(int argc, char* argv[]) {
         verified = verified && totals[samplePercent].verified;
     }
     std::cout << "Simulation engine: LZ4-default\n"
-              << "Archive codec: LZ4-default (in-process)\n"
+              << "Archive codec: " << codecLabel << " (in-process)\n"
               << "Completed sampling comparison. Verified: "
               << (verified ? "true" : "false") << '\n';
     return verified ? 0 : 3;

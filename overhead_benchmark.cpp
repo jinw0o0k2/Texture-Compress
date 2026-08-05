@@ -90,35 +90,43 @@ int main(int argc, char* argv[]) {
         std::cout
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
-               " [legacy_level=7] [runs=5] [sample=20]\n";
+               " [lz4|lz4hc|zstd] [level] [runs=5] [sample=20]\n";
         return 1;
     }
 
     fs::path input = fs::absolute(argv[1]);
     fs::path rawCsv = argc >= 3 ? fs::absolute(argv[2])
                                 : fs::absolute("overhead_raw.csv");
-    int level = 7;
+    string codec = argc >= 4 ? argv[3] : "lz4";
+    int level = codec == "lz4hc" ? 3 : (codec == "zstd" ? 1 : 0);
     int runs = 5;
     int samplePercent = 20;
     try {
-        if (argc >= 4) level = std::stoi(argv[3]);
-        if (argc >= 5) runs = std::stoi(argv[4]);
-        if (argc >= 7) {
-            // Backward compatibility with the old decoder.exe argument.
-            samplePercent = std::stoi(argv[6]);
-        } else if (argc >= 6) {
-            samplePercent = std::stoi(argv[5]);
-        }
+        if (argc >= 5) level = std::stoi(argv[4]);
+        if (argc >= 6) runs = std::stoi(argv[5]);
+        if (argc >= 7) samplePercent = std::stoi(argv[6]);
     } catch (...) {
-        std::cerr << "legacy_level, runs, and sample must be integers.\n";
+        std::cerr << "level, runs, and sample must be integers.\n";
         return 1;
     }
     if (!fs::exists(input)) {
         std::cerr << "Input does not exist: " << input.string() << '\n';
         return 1;
     }
-    if (level != 7 && level != 8 && level != 9) {
-        std::cerr << "pigz level must be 7, 8, or 9.\n";
+    if (!IsInProcessCodec(codec)) {
+        std::cerr << "codec must be lz4, lz4hc, or zstd.\n";
+        return 1;
+    }
+    if (codec == "lz4hc" &&
+        (level < LZ4HC_CLEVEL_MIN || level > LZ4HC_CLEVEL_MAX)) {
+        std::cerr << "LZ4HC level must be from " << LZ4HC_CLEVEL_MIN
+                  << " to " << LZ4HC_CLEVEL_MAX << ".\n";
+        return 1;
+    }
+    if (codec == "zstd" &&
+        (level < ZSTD_minCLevel() || level > ZSTD_maxCLevel())) {
+        std::cerr << "Zstd level must be from " << ZSTD_minCLevel()
+                  << " to " << ZSTD_maxCLevel() << ".\n";
         return 1;
     }
     if (runs < 1) {
@@ -161,18 +169,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    raw << "file,run,legacy_level,archive_codec,sample_percent,simulation_engine,"
+    raw << "file,run,codec_level,archive_codec,sample_percent,simulation_engine,"
            "original_bytes,prepared_bytes,compressed_bytes,"
            "scan_method,preprocess_ms,secondary_compress_ms,total_encode_ms,"
            "decode_core_ms,decode_write_ms,total_decode_ms,verified\n";
-    summary << "file,runs,legacy_level,archive_codec,sample_percent,simulation_engine,"
+    summary << "file,runs,codec_level,archive_codec,sample_percent,simulation_engine,"
                "original_bytes,compressed_bytes,ratio,"
                "preprocess_avg_ms,secondary_compress_avg_ms,total_encode_avg_ms,"
                "decode_core_avg_ms,decode_write_avg_ms,total_decode_avg_ms,"
                "all_verified\n";
 
-    archiveMode = "lz4";
+    archiveMode = codec;
     compressionLevel = level;
+    const string codecLabel = ArchiveCodecLabel(codec, level);
     std::vector<FileAverage> averages;
     bool allVerified = true;
 
@@ -200,7 +209,8 @@ int main(int argc, char* argv[]) {
             if (ec) return 2;
 
             fs::path archive = runDir /
-                               (source.filename().string() + ".packed.lz4");
+                               (source.filename().string() +
+                                ArchiveExtension(codec));
             int bestMethod = 0;
             vector<uint8_t> prepared;
             vector<uint8_t> packed;
@@ -217,11 +227,12 @@ int main(int argc, char* argv[]) {
 
             auto secondaryBegin = Clock::now();
             bool compressedOk =
-                PackedLz4::Compress(prepared, packed) &&
+                CompressPreparedData(prepared, packed, codec, level) &&
                 WriteWholeFile(archive, packed.data(), packed.size());
             auto secondaryEnd = Clock::now();
             if (!compressedOk) {
-                std::cerr << "LZ4 compression failed: " << source.string() << '\n';
+                std::cerr << codecLabel << " compression failed: "
+                          << source.string() << '\n';
                 return 2;
             }
 
@@ -229,7 +240,8 @@ int main(int argc, char* argv[]) {
             vector<uint8_t> decodedPrepared;
             vector<uint8_t> restoredDds;
             auto decodeCoreBegin = Clock::now();
-            bool decoded = PackedLz4::Decompress(packed, decodedPrepared) &&
+            bool decoded = DecompressPreparedData(
+                               packed, decodedPrepared, codec) &&
                            PreprocessedRestore::ToDds(
                                decodedPrepared, restoredDds);
             auto decodeCoreEnd = Clock::now();
@@ -260,7 +272,7 @@ int main(int argc, char* argv[]) {
             average.totalDecodeMs += decodeMs;
 
             raw << Csv(average.relativePath) << ',' << run << ',' << level
-                << ",LZ4-default," << samplePercent << ",LZ4-default,"
+                << ',' << codecLabel << ',' << samplePercent << ",LZ4-default,"
                 << average.originalBytes << ',' << prepared.size() << ','
                 << average.compressedBytes << ','
                 << OrderMethodName(bestMethod) << ','
@@ -282,7 +294,7 @@ int main(int argc, char* argv[]) {
         averages.push_back(average);
 
         summary << Csv(average.relativePath) << ',' << runs << ',' << level
-                << ",LZ4-default," << samplePercent << ",LZ4-default,"
+                << ',' << codecLabel << ',' << samplePercent << ",LZ4-default,"
                 << average.originalBytes << ',' << average.compressedBytes << ','
                 << std::fixed << std::setprecision(6)
                 << static_cast<double>(average.originalBytes) / average.compressedBytes << ','
@@ -317,7 +329,7 @@ int main(int argc, char* argv[]) {
     std::cout << std::fixed << std::setprecision(3)
               << "Files: " << averages.size() << '\n'
               << "Runs per file: " << runs << '\n'
-              << "Archive codec: LZ4-default\n"
+              << "Archive codec: " << codecLabel << '\n'
               << "Sample: " << samplePercent << "%\n"
               << "Simulation engine: LZ4-default\n"
               << "Preprocess total average: " << preprocessTotal << " ms\n"

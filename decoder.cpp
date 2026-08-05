@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "PackedLz4.hpp"
+#include "PackedZstd.hpp"
 #include "PreprocessedRestore.hpp"
 #include "ScanAlgorithms.hpp"
 
@@ -237,8 +238,18 @@ string RemovePackedExtension(string filename) {
     const string zipSuffix = ".packed.zip";
     const string sevenZipSuffix = ".packed.7z";
     const string lz4Suffix = ".packed.lz4";
+    const string lz4hcSuffix = ".packed.lz4hc";
+    const string zstdSuffix = ".packed.zst";
 
-    if (filename.size() >= lz4Suffix.size() &&
+    if (filename.size() >= lz4hcSuffix.size() &&
+        filename.compare(filename.size() - lz4hcSuffix.size(),
+                         lz4hcSuffix.size(), lz4hcSuffix) == 0) {
+        filename.erase(filename.size() - lz4hcSuffix.size());
+    } else if (filename.size() >= zstdSuffix.size() &&
+        filename.compare(filename.size() - zstdSuffix.size(),
+                         zstdSuffix.size(), zstdSuffix) == 0) {
+        filename.erase(filename.size() - zstdSuffix.size());
+    } else if (filename.size() >= lz4Suffix.size() &&
         filename.compare(filename.size() - lz4Suffix.size(),
                          lz4Suffix.size(), lz4Suffix) == 0) {
         filename.erase(filename.size() - lz4Suffix.size());
@@ -259,13 +270,19 @@ bool IsPackedArchive(const fs::path& path) {
     const string zipSuffix = ".packed.zip";
     const string sevenZipSuffix = ".packed.7z";
     const string lz4Suffix = ".packed.lz4";
+    const string lz4hcSuffix = ".packed.lz4hc";
+    const string zstdSuffix = ".packed.zst";
     bool isZip = name.size() >= zipSuffix.size() &&
                  name.compare(name.size() - zipSuffix.size(), zipSuffix.size(), zipSuffix) == 0;
     bool is7z = name.size() >= sevenZipSuffix.size() &&
                  name.compare(name.size() - sevenZipSuffix.size(), sevenZipSuffix.size(), sevenZipSuffix) == 0;
     bool isLz4 = name.size() >= lz4Suffix.size() &&
                  name.compare(name.size() - lz4Suffix.size(), lz4Suffix.size(), lz4Suffix) == 0;
-    return isZip || is7z || isLz4;
+    bool isLz4hc = name.size() >= lz4hcSuffix.size() &&
+                   name.compare(name.size() - lz4hcSuffix.size(), lz4hcSuffix.size(), lz4hcSuffix) == 0;
+    bool isZstd = name.size() >= zstdSuffix.size() &&
+                  name.compare(name.size() - zstdSuffix.size(), zstdSuffix.size(), zstdSuffix) == 0;
+    return isZip || is7z || isLz4 || isLz4hc || isZstd;
 }
 
 bool DecodeFile(const fs::path& archivePath,
@@ -275,12 +292,16 @@ bool DecodeFile(const fs::path& archivePath,
                           RemovePackedExtension(relativePath.filename().string());
 
     bool ok = false;
-    if (archivePath.extension() == ".lz4") {
+    if (archivePath.extension() == ".lz4" ||
+        archivePath.extension() == ".lz4hc" ||
+        archivePath.extension() == ".zst") {
         vector<uint8_t> packed;
         vector<uint8_t> prepared;
         vector<uint8_t> dds;
         ok = ReadWholeFile(archivePath, packed) &&
-             PackedLz4::Decompress(packed, prepared) &&
+             (archivePath.extension() == ".zst"
+                  ? PackedZstd::Decompress(packed, prepared)
+                  : PackedLz4::Decompress(packed, prepared)) &&
              PreprocessedRestore::ToDds(prepared, dds);
         if (ok) {
             error_code ec;

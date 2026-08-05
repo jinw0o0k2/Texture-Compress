@@ -20,22 +20,36 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(lz4)
 
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
+
 find_package(Threads REQUIRED)
 
 add_executable(encoder encoder.cpp)
 target_link_libraries(
-    encoder PRIVATE lz4_static Threads::Threads)
+    encoder PRIVATE lz4_static libzstd_static Threads::Threads)
 
 add_executable(decoder decoder.cpp)
-target_link_libraries(decoder PRIVATE lz4_static)
+target_link_libraries(decoder PRIVATE lz4_static libzstd_static)
 
 add_executable(overhead_benchmark overhead_benchmark.cpp)
 target_link_libraries(
     overhead_benchmark
-    PRIVATE lz4_static Threads::Threads)
+    PRIVATE lz4_static libzstd_static Threads::Threads)
 
 add_executable(
     sampling_comparison_benchmark sampling_comparison_benchmark.cpp)
 target_link_libraries(
     sampling_comparison_benchmark
-    PRIVATE lz4_static Threads::Threads)
+    PRIVATE lz4_static libzstd_static Threads::Threads)

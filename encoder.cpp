@@ -10,6 +10,7 @@
 
 #include "lz4.h"
 #include "PackedLz4.hpp"
+#include "PackedZstd.hpp"
 #include "ScanAlgorithms.hpp"
 
 using namespace std;
@@ -29,6 +30,51 @@ static int compressionLevel = 7;
 static string archiveMode = "lz4";
 static int requestedOrderMethod = -1;
 static int simulationSamplePercent = 20;
+
+bool IsInProcessCodec(const string& mode) {
+    return mode == "lz4" || mode == "lz4hc" || mode == "zstd";
+}
+
+string ArchiveExtension(const string& mode) {
+    if (mode == "lz4") return ".packed.lz4";
+    if (mode == "lz4hc") return ".packed.lz4hc";
+    if (mode == "zstd") return ".packed.zst";
+    if (mode == "7z") return ".packed.7z";
+    return ".packed.zip";
+}
+
+string ArchiveCodecLabel(const string& mode, int level) {
+    if (mode == "lz4") return "LZ4-default";
+    if (mode == "lz4hc") return "LZ4HC-" + to_string(level);
+    if (mode == "zstd") return "Zstd-" + to_string(level);
+    return mode;
+}
+
+bool CompressPreparedData(const vector<uint8_t>& prepared,
+                          vector<uint8_t>& packed,
+                          const string& mode,
+                          int level) {
+    if (mode == "lz4") return PackedLz4::Compress(prepared, packed);
+    if (mode == "lz4hc") {
+        return PackedLz4::CompressHC(prepared, packed, level);
+    }
+    if (mode == "zstd") {
+        return PackedZstd::Compress(prepared, packed, level);
+    }
+    return false;
+}
+
+bool DecompressPreparedData(const vector<uint8_t>& packed,
+                            vector<uint8_t>& prepared,
+                            const string& mode) {
+    if (mode == "lz4" || mode == "lz4hc") {
+        return PackedLz4::Decompress(packed, prepared);
+    }
+    if (mode == "zstd") {
+        return PackedZstd::Decompress(packed, prepared);
+    }
+    return false;
+}
 
 const char* OrderMethodName(int method) {
     if (method == 1) return "Hilbert";
@@ -366,11 +412,12 @@ bool CompressWithPigz(const fs::path& inputBin, const fs::path& archivePath) {
 }
 
 bool CompressPreparedBin(const fs::path& inputBin, const fs::path& archivePath) {
-    if (archiveMode == "lz4") {
+    if (IsInProcessCodec(archiveMode)) {
         vector<uint8_t> prepared;
         vector<uint8_t> packed;
         if (!ReadWholeFile(inputBin, prepared) ||
-            !PackedLz4::Compress(prepared, packed)) {
+            !CompressPreparedData(
+                prepared, packed, archiveMode, compressionLevel)) {
             return false;
         }
         return WriteWholeFile(archivePath, packed.data(), packed.size());
@@ -390,10 +437,7 @@ bool CompressPreparedBin(const fs::path& inputBin, const fs::path& archivePath) 
 bool EncodeFile(const fs::path& inputPath,
                 const fs::path& outputRoot,
                 const fs::path& relativePath) {
-    string extension = archiveMode == "lz4"
-                           ? ".packed.lz4"
-                           : (archiveMode == "7z" ? ".packed.7z"
-                                                   : ".packed.zip");
+    string extension = ArchiveExtension(archiveMode);
     fs::path archivePath = outputRoot / relativePath;
     archivePath += extension;
 
@@ -403,14 +447,15 @@ bool EncodeFile(const fs::path& inputPath,
 
     int bestMethod = 0;
     bool ok = false;
-    if (archiveMode == "lz4") {
+    if (IsInProcessCodec(archiveMode)) {
         vector<uint8_t> prepared;
         vector<uint8_t> packed;
         ok = BuildOurPreprocessedData(
                  inputPath, prepared, bestMethod,
                  requestedOrderMethod, nullptr, 0x5U,
                  simulationSamplePercent) &&
-             PackedLz4::Compress(prepared, packed) &&
+             CompressPreparedData(
+                 prepared, packed, archiveMode, compressionLevel) &&
              WriteWholeFile(archivePath, packed.data(), packed.size());
     } else {
         fs::path tempBin = archivePath;
@@ -434,7 +479,8 @@ bool EncodeFile(const fs::path& inputPath,
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         cout << "Usage: " << argv[0]
-             << " <input.dds|folder> [output_folder] [lz4|pigz|7z] [level=7]"
+             << " <input.dds|folder> [output_folder]"
+                " [lz4|lz4hc|zstd|pigz|7z] [level]"
                 " [auto|scanline|zorder] [sample=20|10|100]\n";
         return 1;
     }
@@ -447,11 +493,15 @@ int main(int argc, char* argv[]) {
     if (argc >= 4) {
         archiveMode = argv[3];
         if (archiveMode == "zip") archiveMode = "pigz"; // Backward-compatible alias.
-        if (archiveMode != "lz4" && archiveMode != "pigz" &&
+        if (!IsInProcessCodec(archiveMode) && archiveMode != "pigz" &&
             archiveMode != "7z") {
-            cerr << "Archive mode must be lz4, pigz, or 7z.\n";
+            cerr << "Archive mode must be lz4, lz4hc, zstd, pigz, or 7z.\n";
             return 1;
         }
+    }
+    if (argc < 5) {
+        if (archiveMode == "lz4hc") compressionLevel = 3;
+        else if (archiveMode == "zstd") compressionLevel = 1;
     }
     if (argc >= 5) {
         try {
@@ -468,6 +518,20 @@ int main(int argc, char* argv[]) {
         if (archiveMode == "7z" &&
             (compressionLevel < 0 || compressionLevel > 9)) {
             cerr << "7z level must be from 0 to 9.\n";
+            return 1;
+        }
+        if (archiveMode == "lz4hc" &&
+            (compressionLevel < LZ4HC_CLEVEL_MIN ||
+             compressionLevel > LZ4HC_CLEVEL_MAX)) {
+            cerr << "LZ4HC level must be from " << LZ4HC_CLEVEL_MIN
+                 << " to " << LZ4HC_CLEVEL_MAX << ".\n";
+            return 1;
+        }
+        if (archiveMode == "zstd" &&
+            (compressionLevel < ZSTD_minCLevel() ||
+             compressionLevel > ZSTD_maxCLevel())) {
+            cerr << "Zstd level must be from " << ZSTD_minCLevel()
+                 << " to " << ZSTD_maxCLevel() << ".\n";
             return 1;
         }
     }
