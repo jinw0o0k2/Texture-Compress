@@ -193,28 +193,32 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
         ScanAlgorithms::isPowerOfTwo(blocksW) &&
         blockCount == expectedTopLevelBlocks;
 
-    candidateMask &= 0x5U; // Scanline and Z-order only.
+    candidateMask &= 0x7U; // Scanline, Hilbert, and Z-order.
     if (!zOrderEligible) {
         candidateMask = 0x1U;
-        if (forcedMethod < 0 || forcedMethod == 2) forcedMethod = 0;
+        if (forcedMethod < 0 || forcedMethod == 1 || forcedMethod == 2) {
+            forcedMethod = 0;
+        }
     }
-    if (forcedMethod == 1 || forcedMethod > 2) return false;
+    if (forcedMethod > 2) return false;
 
-    shared_ptr<const vector<uint32_t>> zOrderLut;
-    vector<BlockData> zOrderBlocks;
-    const bool needZOrder =
-        zOrderEligible &&
+    shared_ptr<const vector<uint32_t>> zOrderTargetToLinear;
+    shared_ptr<const vector<uint32_t>> hilbertTargetToLinear;
+    const bool needZOrder = zOrderEligible &&
         (forcedMethod == 2 ||
          (forcedMethod < 0 && (candidateMask & 0x4U) != 0));
+    const bool needHilbert = zOrderEligible &&
+        (forcedMethod == 1 ||
+         (forcedMethod < 0 && (candidateMask & 0x2U) != 0));
     if (needZOrder) {
-        zOrderLut =
-            ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
-        if (zOrderLut->size() != blockCount) return false;
-        zOrderBlocks.resize(blockCount);
-        for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
-            uint32_t targetIdx = (*zOrderLut)[linearIdx];
-            zOrderBlocks[targetIdx] = blocks[linearIdx];
-        }
+        zOrderTargetToLinear =
+            ScanAlgorithms::getZOrderTargetToLinearLut(blocksW);
+        if (zOrderTargetToLinear->size() != blockCount) return false;
+    }
+    if (needHilbert) {
+        hilbertTargetToLinear =
+            ScanAlgorithms::getHilbertTargetToLinearLut(blocksW);
+        if (hilbertTargetToLinear->size() != blockCount) return false;
     }
 
     if (samplePercent != 100 &&
@@ -228,27 +232,20 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
             : max<size_t>(
                   1, (blockCount * static_cast<size_t>(samplePercent) + 99) /
                          100);
-    vector<uint8_t> sampleMask;
-    if (sampleCount != blockCount) {
-        sampleMask.assign(blockCount, 0);
-        for (size_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
-            size_t linearIdx = sampleIdx * blockCount / sampleCount;
-            sampleMask[linearIdx] = 1;
-        }
-    }
+    auto LinearIndexAt = [&](int method, size_t orderedIdx) -> size_t {
+        if (method == 1) return (*hilbertTargetToLinear)[orderedIdx];
+        if (method == 2) return (*zOrderTargetToLinear)[orderedIdx];
+        return orderedIdx;
+    };
 
     auto CalculateSizeInMemory = [&](int method) -> long {
-        const vector<BlockData>& orderedBlocks =
-            method == 2 ? zOrderBlocks : blocks;
-
         const size_t simulationBufferSize = sampleCount * bytesPerBlock;
         unique_ptr<uint8_t[]> simBuf(new uint8_t[simulationBufferSize]);
         size_t offset = 0;
-        for (const auto& b : orderedBlocks) {
-            if (!sampleMask.empty() &&
-                sampleMask[b.originalLinearIdx] == 0) {
-                continue;
-            }
+        for (size_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
+            const size_t orderedIdx =
+                sampleIdx * blockCount / sampleCount;
+            const BlockData& b = blocks[LinearIndexAt(method, orderedIdx)];
             if (isBC3 || isBC4) {
                 simBuf[offset++] = b.a0;
                 simBuf[offset++] = b.a1;
@@ -311,8 +308,9 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
         if (simulatedSizes) *simulatedSizes = sizes;
     }
 
-    const vector<BlockData>& finalBlocks =
-        bestMethod == 2 ? zOrderBlocks : blocks;
+    auto FinalBlockAt = [&](size_t orderedIdx) -> const BlockData& {
+        return blocks[LinearIndexAt(bestMethod, orderedIdx)];
+    };
 
     finalData.resize(128 + 1 + totalBufferSize);
     size_t finalOffset = 0;
@@ -321,23 +319,27 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
     finalData[finalOffset++] = static_cast<uint8_t>(bestMethod);
 
     if (isBC3 || isBC4) {
-        for (const auto& b : finalBlocks) {
+        for (size_t i = 0; i < blockCount; ++i) {
+            const auto& b = FinalBlockAt(i);
             finalData[finalOffset++] = b.a0;
             finalData[finalOffset++] = b.a1;
         }
-        for (const auto& b : finalBlocks) {
+        for (size_t i = 0; i < blockCount; ++i) {
+            const auto& b = FinalBlockAt(i);
             memcpy(finalData.data() + finalOffset, &b.a_idx, 6);
             finalOffset += 6;
         }
     }
     if (!isBC4) {
-        for (const auto& b : finalBlocks) {
+        for (size_t i = 0; i < blockCount; ++i) {
+            const auto& b = FinalBlockAt(i);
             memcpy(finalData.data() + finalOffset, &b.c0, 2);
             finalOffset += 2;
             memcpy(finalData.data() + finalOffset, &b.c1, 2);
             finalOffset += 2;
         }
-        for (const auto& b : finalBlocks) {
+        for (size_t i = 0; i < blockCount; ++i) {
+            const auto& b = FinalBlockAt(i);
             memcpy(finalData.data() + finalOffset, &b.c_idx, 4);
             finalOffset += 4;
         }
@@ -455,7 +457,7 @@ bool EncodeFile(const fs::path& inputPath,
         vector<uint8_t> packed;
         ok = BuildOurPreprocessedData(
                  inputPath, prepared, bestMethod,
-                 requestedOrderMethod, nullptr, 0x5U,
+                 requestedOrderMethod, nullptr, 0x7U,
                  simulationSamplePercent) &&
              CompressPreparedData(
                  prepared, packed, archiveMode, compressionLevel) &&
@@ -465,7 +467,7 @@ bool EncodeFile(const fs::path& inputPath,
         tempBin += ".tmp.bin";
         ok = BuildOurPreprocessedBin(
                  inputPath, tempBin, bestMethod,
-                 requestedOrderMethod, nullptr, 0x5U,
+                 requestedOrderMethod, nullptr, 0x7U,
                  simulationSamplePercent) &&
              CompressPreparedBin(tempBin, archivePath);
         fs::remove(tempBin, ec);
@@ -484,7 +486,7 @@ int main(int argc, char* argv[]) {
         cout << "Usage: " << argv[0]
              << " <input.dds|folder> [output_folder]"
                 " [lz4|lz4hc|zstd|pigz|7z] [level]"
-                " [auto|scanline|zorder] [sample=20|10|100]\n";
+                " [auto|scanline|hilbert|zorder] [sample=20|10|100]\n";
         return 1;
     }
 
@@ -542,9 +544,10 @@ int main(int argc, char* argv[]) {
         string order = argv[5];
         if (order == "auto") requestedOrderMethod = -1;
         else if (order == "scanline") requestedOrderMethod = 0;
+        else if (order == "hilbert") requestedOrderMethod = 1;
         else if (order == "zorder") requestedOrderMethod = 2;
         else {
-            cerr << "Order must be auto, scanline, or zorder.\n";
+            cerr << "Order must be auto, scanline, hilbert, or zorder.\n";
             return 1;
         }
     }

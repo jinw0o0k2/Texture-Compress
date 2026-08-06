@@ -217,7 +217,7 @@ int main(int argc, char* argv[]) {
 
             auto preprocessBegin = Clock::now();
             bool preparedOk = BuildOurPreprocessedData(
-                source, prepared, bestMethod, -1, nullptr, 0x5U,
+                source, prepared, bestMethod, -1, nullptr, 0x7U,
                 samplePercent);
             auto preprocessEnd = Clock::now();
             if (!preparedOk) {

@@ -55,6 +55,28 @@ public:
         return lut;
     }
 
+    static std::shared_ptr<const std::vector<uint32_t>>
+    getZOrderTargetToLinearLut(uint32_t side) {
+        static std::mutex cacheMutex;
+        static std::unordered_map<
+            uint32_t,
+            std::shared_ptr<const std::vector<uint32_t>>> cache;
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto found = cache.find(side);
+        if (found != cache.end()) return found->second;
+
+        auto linearToTarget = getZOrderLinearToTargetLut(side);
+        auto lut = std::make_shared<std::vector<uint32_t>>(
+            linearToTarget->size());
+        for (std::size_t linear = 0; linear < linearToTarget->size(); ++linear) {
+            (*lut)[(*linearToTarget)[linear]] =
+                static_cast<uint32_t>(linear);
+        }
+        cache.emplace(side, lut);
+        return lut;
+    }
+
     static void rotateHilbert(uint32_t n,
                               uint32_t* x,
                               uint32_t* y,
@@ -90,6 +112,53 @@ public:
             side <<= 1;
         }
         return getHilbertIndex(side, x, y);
+    }
+
+    static std::shared_ptr<const std::vector<uint32_t>>
+    getHilbertLinearToTargetLut(uint32_t side) {
+        static std::mutex cacheMutex;
+        static std::unordered_map<
+            uint32_t,
+            std::shared_ptr<const std::vector<uint32_t>>> cache;
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto found = cache.find(side);
+        if (found != cache.end()) return found->second;
+
+        const std::size_t count = static_cast<std::size_t>(side) * side;
+        auto lut = std::make_shared<std::vector<uint32_t>>(count);
+        for (uint32_t y = 0; y < side; ++y) {
+            for (uint32_t x = 0; x < side; ++x) {
+                const std::size_t linear =
+                    static_cast<std::size_t>(y) * side + x;
+                (*lut)[linear] = static_cast<uint32_t>(
+                    getHilbertIndex(side, x, y));
+            }
+        }
+        cache.emplace(side, lut);
+        return lut;
+    }
+
+    static std::shared_ptr<const std::vector<uint32_t>>
+    getHilbertTargetToLinearLut(uint32_t side) {
+        static std::mutex cacheMutex;
+        static std::unordered_map<
+            uint32_t,
+            std::shared_ptr<const std::vector<uint32_t>>> cache;
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto found = cache.find(side);
+        if (found != cache.end()) return found->second;
+
+        auto linearToTarget = getHilbertLinearToTargetLut(side);
+        auto lut = std::make_shared<std::vector<uint32_t>>(
+            linearToTarget->size());
+        for (std::size_t linear = 0; linear < linearToTarget->size(); ++linear) {
+            (*lut)[(*linearToTarget)[linear]] =
+                static_cast<uint32_t>(linear);
+        }
+        cache.emplace(side, lut);
+        return lut;
     }
 };
 

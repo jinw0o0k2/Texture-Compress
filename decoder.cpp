@@ -152,35 +152,37 @@ bool RestoreOurPreprocessedData(const vector<uint8_t>& buffer,
     vector<BlockData> restoredBlocks(blockCount);
     if (methodFlag == 0) {
         restoredBlocks = std::move(sortedBlocks);
-    } else if (methodFlag == 2) {
+    } else if (methodFlag == 1 || methodFlag == 2) {
         const size_t expectedTopLevelBlocks =
             static_cast<size_t>(blocksW) * blocksH;
-        if (blocksW != blocksH ||
-            !ScanAlgorithms::isPowerOfTwo(blocksW) ||
-            blockCount != expectedTopLevelBlocks) {
+        if (blocksW == blocksH &&
+            ScanAlgorithms::isPowerOfTwo(blocksW) &&
+            blockCount == expectedTopLevelBlocks) {
+            auto linearToTarget = methodFlag == 1
+                ? ScanAlgorithms::getHilbertLinearToTargetLut(blocksW)
+                : ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
+            if (linearToTarget->size() != blockCount) return false;
+            for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
+                restoredBlocks[linearIdx] =
+                    sortedBlocks[(*linearToTarget)[linearIdx]];
+            }
+        } else if (methodFlag == 1) {
+            // Backward compatibility for old rectangular Hilbert archives.
+            vector<MapInfo> mapping(blockCount);
+            for (size_t i = 0; i < blockCount; ++i) {
+                uint32_t y = static_cast<uint32_t>(i / blocksW);
+                uint32_t x = static_cast<uint32_t>(i % blocksW);
+                mapping[i].linearIdx = static_cast<uint32_t>(i);
+                mapping[i].sortKey =
+                    ScanAlgorithms::getHilbertIndexForRect(
+                        blocksW, blocksH, x, y);
+            }
+            sort(mapping.begin(), mapping.end());
+            for (size_t i = 0; i < blockCount; ++i) {
+                restoredBlocks[mapping[i].linearIdx] = sortedBlocks[i];
+            }
+        } else {
             return false;
-        }
-        auto zOrderLut =
-            ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
-        if (zOrderLut->size() != blockCount) return false;
-        for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
-            restoredBlocks[linearIdx] =
-                sortedBlocks[(*zOrderLut)[linearIdx]];
-        }
-    } else {
-        // Backward compatibility for archives produced by the old Hilbert encoder.
-        vector<MapInfo> mapping(blockCount);
-        for (size_t i = 0; i < blockCount; ++i) {
-            uint32_t y = static_cast<uint32_t>(i / blocksW);
-            uint32_t x = static_cast<uint32_t>(i % blocksW);
-            mapping[i].linearIdx = static_cast<uint32_t>(i);
-            mapping[i].sortKey =
-                ScanAlgorithms::getHilbertIndexForRect(
-                    blocksW, blocksH, x, y);
-        }
-        sort(mapping.begin(), mapping.end());
-        for (size_t i = 0; i < blockCount; ++i) {
-            restoredBlocks[mapping[i].linearIdx] = sortedBlocks[i];
         }
     }
 

@@ -25,6 +25,7 @@ struct Aggregate {
     double decodeWriteMs = 0.0;
     double decodeMs = 0.0;
     int scanlineSelections = 0;
+    int hilbertSelections = 0;
     int zOrderSelections = 0;
     bool verified = true;
 };
@@ -138,7 +139,7 @@ int main(int argc, char* argv[]) {
                "secondary_avg_ms,total_encode_avg_ms,decode_core_avg_ms,"
                "decode_write_avg_ms,total_decode_avg_ms,"
                "matches_100_percent,all_verified\n";
-    total << "sample_percent,simulation_engine,archive_codec,files,runs,scanline_selections,zorder_selections,"
+    total << "sample_percent,simulation_engine,archive_codec,files,runs,scanline_selections,hilbert_selections,zorder_selections,"
              "matches_100_percent,original_bytes,compressed_bytes,"
              "compressed_percent,ratio,preprocess_total_avg_ms,"
              "secondary_total_avg_ms,total_encode_avg_ms,decode_core_total_avg_ms,"
@@ -191,7 +192,7 @@ int main(int argc, char* argv[]) {
                 int selectedMethod = -1;
                 auto preprocessBegin = Clock::now();
                 bool built = BuildOurPreprocessedData(
-                    source, prepared, selectedMethod, -1, nullptr, 0x5U,
+                    source, prepared, selectedMethod, -1, nullptr, 0x7U,
                     samplePercent);
                 auto preprocessEnd = Clock::now();
                 if (!built) return 2;
@@ -275,6 +276,8 @@ int main(int argc, char* argv[]) {
             value.decodeMs /= runs;
             value.scanlineSelections =
                 selectedMethods[sampleIndex] == 0 ? 1 : 0;
+            value.hilbertSelections =
+                selectedMethods[sampleIndex] == 1 ? 1 : 0;
             value.zOrderSelections =
                 selectedMethods[sampleIndex] == 2 ? 1 : 0;
             bool matches =
@@ -304,6 +307,7 @@ int main(int argc, char* argv[]) {
             aggregate.decodeWriteMs += value.decodeWriteMs;
             aggregate.decodeMs += value.decodeMs;
             aggregate.scanlineSelections += value.scanlineSelections;
+            aggregate.hilbertSelections += value.hilbertSelections;
             aggregate.zOrderSelections += value.zOrderSelections;
             aggregate.verified = aggregate.verified && value.verified;
         }
@@ -314,7 +318,8 @@ int main(int argc, char* argv[]) {
         const Aggregate& value = totals.at(samplePercent);
         total << samplePercent << ",LZ4-default," << codecLabel << ','
               << files.size() << ',' << runs << ','
-              << value.scanlineSelections << ',' << value.zOrderSelections
+              << value.scanlineSelections << ',' << value.hilbertSelections
+              << ',' << value.zOrderSelections
               << ',' << matches100[samplePercent] << ','
               << value.originalBytes << ',' << value.compressedBytes << ','
               << std::fixed << std::setprecision(6)
