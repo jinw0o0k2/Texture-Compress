@@ -30,6 +30,11 @@ static int compressionLevel = 7;
 static string archiveMode = "lz4";
 static int requestedOrderMethod = -1;
 static int simulationSamplePercent = 20;
+static string simulationEngine = "lz4";
+
+string SimulationEngineLabel(const string& engine) {
+    return engine == "zstd" ? "Zstd-1-ST" : "LZ4-default";
+}
 
 bool IsInProcessCodec(const string& mode) {
     return mode == "lz4" || mode == "lz4hc" || mode == "zstd";
@@ -121,7 +126,11 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
                               int forcedMethod,
                               vector<long>* simulatedSizes,
                               unsigned candidateMask,
-                              int samplePercent) {
+                              int samplePercent,
+                              const string& simulationCodec = "lz4") {
+    if (simulationCodec != "lz4" && simulationCodec != "zstd") {
+        return false;
+    }
     vector<uint8_t> originBuffer;
     if (!ReadWholeFile(inputPath, originBuffer) || originBuffer.size() <= 128) {
         return false;
@@ -263,22 +272,32 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
         }
         if (offset != simulationBufferSize) return 0;
 
-        if (simulationBufferSize >
-            static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
+        if (simulationCodec == "zstd") {
+            const size_t compressedCapacity =
+                ZSTD_compressBound(simulationBufferSize);
+            if (ZSTD_isError(compressedCapacity)) return 0;
+            vector<uint8_t> compressedBuf(compressedCapacity);
+            const size_t compressedSize = ZSTD_compress(
+                compressedBuf.data(), compressedCapacity,
+                simBuf.get(), simulationBufferSize, 1);
+            if (ZSTD_isError(compressedSize) ||
+                compressedSize > static_cast<size_t>(LONG_MAX)) {
+                return 0;
+            }
+            return static_cast<long>(compressedSize);
+        }
+
+        if (simulationBufferSize > static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
             return 0;
         }
-        const int sourceSize =
-            static_cast<int>(simulationBufferSize);
+        const int sourceSize = static_cast<int>(simulationBufferSize);
         const int compressedCapacity = LZ4_compressBound(sourceSize);
         if (compressedCapacity <= 0) return 0;
-
         unique_ptr<char[]> compressedBuf(new char[compressedCapacity]);
         const int compressedSize = LZ4_compress_default(
             reinterpret_cast<const char*>(simBuf.get()),
             compressedBuf.get(), sourceSize, compressedCapacity);
-        return compressedSize > 0
-                   ? static_cast<long>(compressedSize)
-                   : 0;
+        return compressedSize > 0 ? static_cast<long>(compressedSize) : 0;
     };
 
     if (forcedMethod >= 0) {
@@ -354,11 +373,13 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
                              int forcedMethod = -1,
                              vector<long>* simulatedSizes = nullptr,
                              unsigned candidateMask = 0x7U,
-                             int samplePercent = 100) {
+                             int samplePercent = 100,
+                             const string& simulationCodec = "lz4") {
     vector<uint8_t> finalData;
     if (!BuildOurPreprocessedData(
             inputPath, finalData, bestMethod, forcedMethod,
-            simulatedSizes, candidateMask, samplePercent)) {
+            simulatedSizes, candidateMask, samplePercent,
+            simulationCodec)) {
         return false;
     }
     return WriteWholeFile(
@@ -458,7 +479,7 @@ bool EncodeFile(const fs::path& inputPath,
         ok = BuildOurPreprocessedData(
                  inputPath, prepared, bestMethod,
                  requestedOrderMethod, nullptr, 0x7U,
-                 simulationSamplePercent) &&
+                 simulationSamplePercent, simulationEngine) &&
              CompressPreparedData(
                  prepared, packed, archiveMode, compressionLevel) &&
              WriteWholeFile(archivePath, packed.data(), packed.size());
@@ -468,7 +489,7 @@ bool EncodeFile(const fs::path& inputPath,
         ok = BuildOurPreprocessedBin(
                  inputPath, tempBin, bestMethod,
                  requestedOrderMethod, nullptr, 0x7U,
-                 simulationSamplePercent) &&
+                 simulationSamplePercent, simulationEngine) &&
              CompressPreparedBin(tempBin, archivePath);
         fs::remove(tempBin, ec);
     }
@@ -486,7 +507,8 @@ int main(int argc, char* argv[]) {
         cout << "Usage: " << argv[0]
              << " <input.dds|folder> [output_folder]"
                 " [lz4|lz4hc|zstd|pigz|7z] [level]"
-                " [auto|scanline|hilbert|zorder] [sample=20|10|100]\n";
+                " [auto|scanline|hilbert|zorder] [sample=20|10|100]"
+                " [simulation=lz4|zstd]\n";
         return 1;
     }
 
@@ -562,6 +584,13 @@ int main(int argc, char* argv[]) {
             simulationSamplePercent != 20 &&
             simulationSamplePercent != 10) {
             cerr << "Sample percent must be 100, 20, or 10.\n";
+            return 1;
+        }
+    }
+    if (argc >= 8) {
+        simulationEngine = argv[7];
+        if (simulationEngine != "lz4" && simulationEngine != "zstd") {
+            cerr << "Simulation engine must be lz4 or zstd.\n";
             return 1;
         }
     }

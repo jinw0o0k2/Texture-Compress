@@ -86,11 +86,12 @@ std::vector<fs::path> CollectDdsFiles(const fs::path& input) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || argc > 7) {
+    if (argc < 2 || argc > 8) {
         std::cout
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
-               " [lz4|lz4hc|zstd] [level] [runs=5] [sample=20]\n";
+               " [lz4|lz4hc|zstd] [level] [runs=5] [sample=20]"
+               " [simulation=lz4|zstd]\n";
         return 1;
     }
 
@@ -101,6 +102,7 @@ int main(int argc, char* argv[]) {
     int level = codec == "lz4hc" ? 3 : (codec == "zstd" ? 1 : 0);
     int runs = 5;
     int samplePercent = 20;
+    string simulationCodec = argc >= 8 ? argv[7] : "lz4";
     try {
         if (argc >= 5) level = std::stoi(argv[4]);
         if (argc >= 6) runs = std::stoi(argv[5]);
@@ -139,6 +141,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "sample must be 100, 20, or 10.\n";
         return 1;
     }
+    if (simulationCodec != "lz4" && simulationCodec != "zstd") {
+        std::cerr << "simulation must be lz4 or zstd.\n";
+        return 1;
+    }
+    const string simulationLabel = SimulationEngineLabel(simulationCodec);
     std::vector<fs::path> files = CollectDdsFiles(input);
     if (files.empty()) {
         std::cerr << "No DDS files found.\n";
@@ -218,7 +225,7 @@ int main(int argc, char* argv[]) {
             auto preprocessBegin = Clock::now();
             bool preparedOk = BuildOurPreprocessedData(
                 source, prepared, bestMethod, -1, nullptr, 0x7U,
-                samplePercent);
+                samplePercent, simulationCodec);
             auto preprocessEnd = Clock::now();
             if (!preparedOk) {
                 std::cerr << "Preprocessing failed: " << source.string() << '\n';
@@ -272,7 +279,8 @@ int main(int argc, char* argv[]) {
             average.totalDecodeMs += decodeMs;
 
             raw << Csv(average.relativePath) << ',' << run << ',' << level
-                << ',' << codecLabel << ',' << samplePercent << ",LZ4-default,"
+                << ',' << codecLabel << ',' << samplePercent << ','
+                << simulationLabel << ','
                 << average.originalBytes << ',' << prepared.size() << ','
                 << average.compressedBytes << ','
                 << OrderMethodName(bestMethod) << ','
@@ -294,7 +302,8 @@ int main(int argc, char* argv[]) {
         averages.push_back(average);
 
         summary << Csv(average.relativePath) << ',' << runs << ',' << level
-                << ',' << codecLabel << ',' << samplePercent << ",LZ4-default,"
+                << ',' << codecLabel << ',' << samplePercent << ','
+                << simulationLabel << ','
                 << average.originalBytes << ',' << average.compressedBytes << ','
                 << std::fixed << std::setprecision(6)
                 << static_cast<double>(average.originalBytes) / average.compressedBytes << ','
@@ -331,7 +340,7 @@ int main(int argc, char* argv[]) {
               << "Runs per file: " << runs << '\n'
               << "Archive codec: " << codecLabel << '\n'
               << "Sample: " << samplePercent << "%\n"
-              << "Simulation engine: LZ4-default\n"
+              << "Simulation engine: " << simulationLabel << '\n'
               << "Preprocess total average: " << preprocessTotal << " ms\n"
               << "Secondary compression total average: " << secondaryTotal << " ms\n"
               << "Total encode average: " << encodeTotal << " ms\n"

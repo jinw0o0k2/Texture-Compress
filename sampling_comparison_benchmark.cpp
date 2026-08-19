@@ -85,10 +85,11 @@ std::vector<fs::path> CollectDds(const fs::path& input) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || argc > 6) {
+    if (argc < 2 || argc > 7) {
         std::cout << "Usage: " << argv[0]
                   << " <input.dds|folder> [output_dir=sampling_comparison]"
-                     " [lz4|lz4hc|zstd] [level] [runs=5]\n";
+                     " [lz4|lz4hc|zstd] [level] [runs=5]"
+                     " [simulation=lz4|zstd]\n";
         return 1;
     }
 
@@ -98,6 +99,7 @@ int main(int argc, char* argv[]) {
     string codec = argc >= 4 ? argv[3] : "lz4";
     int level = codec == "lz4hc" ? 3 : (codec == "zstd" ? 1 : 0);
     int runs = 5;
+    string simulationCodec = argc >= 7 ? argv[6] : "lz4";
     try {
         if (argc >= 5) level = std::stoi(argv[4]);
         if (argc >= 6) runs = std::stoi(argv[5]);
@@ -105,6 +107,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "level and runs must be integers.\n";
         return 1;
     }
+    if (simulationCodec != "lz4" && simulationCodec != "zstd") {
+        std::cerr << "simulation must be lz4 or zstd.\n";
+        return 1;
+    }
+    const string simulationLabel = SimulationEngineLabel(simulationCodec);
     if (!fs::exists(input) || !IsInProcessCodec(codec) || runs < 1 ||
         (codec == "lz4hc" &&
          (level < LZ4HC_CLEVEL_MIN || level > LZ4HC_CLEVEL_MAX)) ||
@@ -193,7 +200,7 @@ int main(int argc, char* argv[]) {
                 auto preprocessBegin = Clock::now();
                 bool built = BuildOurPreprocessedData(
                     source, prepared, selectedMethod, -1, nullptr, 0x7U,
-                    samplePercent);
+                    samplePercent, simulationCodec);
                 auto preprocessEnd = Clock::now();
                 if (!built) return 2;
                 if (selectedMethods[sampleIndex] < 0) {
@@ -247,7 +254,8 @@ int main(int argc, char* argv[]) {
                 value.decodeMs += decodeMs;
 
                 raw << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default," << codecLabel << ',' << run << ','
+                    << ',' << simulationLabel << ',' << codecLabel << ','
+                    << run << ','
                     << OrderMethodName(selectedMethod)
                     << ',' << value.originalBytes << ','
                     << value.compressedBytes << ','
@@ -285,7 +293,8 @@ int main(int argc, char* argv[]) {
             if (matches) ++matches100[samplePercent];
 
             perFile << Csv(relative.generic_string()) << ',' << samplePercent
-                    << ",LZ4-default," << codecLabel << ',' << runs << ','
+                    << ',' << simulationLabel << ',' << codecLabel << ','
+                    << runs << ','
                     << OrderMethodName(selectedMethods[sampleIndex]) << ','
                     << value.originalBytes << ',' << value.compressedBytes
                     << ',' << std::fixed << std::setprecision(6)
@@ -316,7 +325,8 @@ int main(int argc, char* argv[]) {
 
     for (int samplePercent : kSamples) {
         const Aggregate& value = totals.at(samplePercent);
-        total << samplePercent << ",LZ4-default," << codecLabel << ','
+        total << samplePercent << ',' << simulationLabel << ','
+              << codecLabel << ','
               << files.size() << ',' << runs << ','
               << value.scanlineSelections << ',' << value.hilbertSelections
               << ',' << value.zOrderSelections
@@ -338,7 +348,7 @@ int main(int argc, char* argv[]) {
     for (int samplePercent : kSamples) {
         verified = verified && totals[samplePercent].verified;
     }
-    std::cout << "Simulation engine: LZ4-default\n"
+    std::cout << "Simulation engine: " << simulationLabel << '\n'
               << "Archive codec: " << codecLabel << " (in-process)\n"
               << "Completed sampling comparison. Verified: "
               << (verified ? "true" : "false") << '\n';
