@@ -46,7 +46,6 @@ DDS의 BC 압축 블록을 Scanline 또는 Z-order로 배치하고 채널별로 
   `.packed.zip`, `.packed.7z`를 DDS로 복원합니다.
 - `ScanAlgorithms.hpp`: Scanline, Hilbert 호환, Z-order 및 LUT 구현입니다.
 - `overhead_benchmark.cpp`: 인코딩·디코딩 시간과 압축률을 기본 5회 측정합니다.
-- `sampling_comparison_benchmark.cpp`: 100%·20%·10% 샘플링을 비교합니다.
 
 ## 요구 사항
 
@@ -83,11 +82,9 @@ cmake --build build --config Release
 - `encoder`
 - `decoder`
 - `overhead_benchmark`
-- `sampling_comparison_benchmark`
 
-`overhead_benchmark.cpp`와 `sampling_comparison_benchmark.cpp`는 내부에서
-`encoder.cpp`를 포함하므로 수동 빌드 시 `encoder.cpp`를 명령행에 다시
-추가하지 마십시오.
+`overhead_benchmark.cpp`는 내부에서 `encoder.cpp`를 포함하므로 수동 빌드 시
+`encoder.cpp`를 명령행에 다시 추가하지 마십시오.
 
 ## 인코더 사용법
 
@@ -174,18 +171,6 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\zstd1.csv" zstd 1 5 10
 - `verified`: 복원 결과가 원본과 같은지 여부
 
 원시 CSV와 파일별 평균 summary CSV를 생성합니다.
-
-## 샘플링 비교
-
-```text
-sampling_comparison_benchmark.exe <input.dds|folder> [output_dir] [lz4|lz4hc|zstd] [level] [runs=5]
-```
-
-100%·20%·10%를 파일과 회차마다 교차 실행하여 다음 파일을 생성합니다.
-
-- `sampling_raw.csv`: 모든 실행의 원시값
-- `sampling_per_file.csv`: 파일·샘플 비율별 평균과 100% 선택 일치 여부
-- `sampling_total.csv`: 샘플 비율별 전체 합계
 
 ## 지원 범위 및 주의 사항
 

@@ -1,37 +1,16 @@
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <vector>
 
 #include "PackedLz4.hpp"
 #include "PackedZstd.hpp"
 #include "PreprocessedRestore.hpp"
-#include "ScanAlgorithms.hpp"
 
 using namespace std;
 namespace fs = std::filesystem;
-
-struct BlockData {
-    uint16_t c0 = 0, c1 = 0;
-    uint32_t c_idx = 0;
-    uint8_t a0 = 0, a1 = 0;
-    uint64_t a_idx = 0;
-};
-
-struct MapInfo {
-    uint32_t linearIdx = 0;
-    uint64_t sortKey = 0;
-
-    bool operator<(const MapInfo& other) const {
-        if (sortKey != other.sortKey) return sortKey < other.sortKey;
-        return linearIdx < other.linearIdx;
-    }
-};
 
 static string exe7z = "\"C:\\Program Files\\7-Zip\\7z.exe\"";
 
@@ -84,143 +63,6 @@ bool FindExtractedBin(const fs::path& directory, fs::path& binPath) {
         }
     }
     return false;
-}
-
-bool RestoreOurPreprocessedData(const vector<uint8_t>& buffer,
-                                const fs::path& outputPath) {
-    if (buffer.size() <= 129) return false;
-
-    uint8_t header[128];
-    memcpy(header, buffer.data(), sizeof(header));
-    uint8_t methodFlag = buffer[128];
-    if (methodFlag > 2) return false;
-
-    uint32_t height = 0;
-    uint32_t width = 0;
-    uint32_t fourCC = 0;
-    memcpy(&height, header + 12, sizeof(height));
-    memcpy(&width, header + 16, sizeof(width));
-    memcpy(&fourCC, header + 84, sizeof(fourCC));
-    if (width == 0 || height == 0) return false;
-
-    bool isBC3 = false;
-    bool isBC4 = false;
-    int blockSize = 8;
-    if (fourCC == 0x35545844) { // DXT5 / BC3
-        isBC3 = true;
-        blockSize = 16;
-    } else if (fourCC == 0x31495441 || fourCC == 0x55344342) { // ATI1 / BC4U
-        isBC4 = true;
-    }
-
-    size_t packedPayloadSize = buffer.size() - 129;
-    if (packedPayloadSize % static_cast<size_t>(blockSize) != 0) return false;
-
-    uint32_t blocksW = (width + 3) / 4;
-    uint32_t blocksH = (height + 3) / 4;
-    size_t blockCount = packedPayloadSize / static_cast<size_t>(blockSize);
-    if (blockCount == 0) return false;
-
-    vector<BlockData> sortedBlocks(blockCount);
-    size_t offset = 129;
-
-    if (isBC3 || isBC4) {
-        for (size_t i = 0; i < blockCount; ++i) {
-            sortedBlocks[i].a0 = buffer[offset++];
-            sortedBlocks[i].a1 = buffer[offset++];
-        }
-        for (size_t i = 0; i < blockCount; ++i) {
-            memcpy(&sortedBlocks[i].a_idx, buffer.data() + offset, 6);
-            offset += 6;
-        }
-    }
-
-    if (!isBC4) {
-        for (size_t i = 0; i < blockCount; ++i) {
-            memcpy(&sortedBlocks[i].c0, buffer.data() + offset, 2);
-            offset += 2;
-            memcpy(&sortedBlocks[i].c1, buffer.data() + offset, 2);
-            offset += 2;
-        }
-        for (size_t i = 0; i < blockCount; ++i) {
-            memcpy(&sortedBlocks[i].c_idx, buffer.data() + offset, 4);
-            offset += 4;
-        }
-    }
-    if (offset != buffer.size()) return false;
-
-    vector<BlockData> restoredBlocks(blockCount);
-    if (methodFlag == 0) {
-        restoredBlocks = std::move(sortedBlocks);
-    } else if (methodFlag == 1 || methodFlag == 2) {
-        const size_t expectedTopLevelBlocks =
-            static_cast<size_t>(blocksW) * blocksH;
-        if (blocksW == blocksH &&
-            ScanAlgorithms::isPowerOfTwo(blocksW) &&
-            blockCount == expectedTopLevelBlocks) {
-            auto linearToTarget = methodFlag == 1
-                ? ScanAlgorithms::getHilbertLinearToTargetLut(blocksW)
-                : ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
-            if (linearToTarget->size() != blockCount) return false;
-            for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
-                restoredBlocks[linearIdx] =
-                    sortedBlocks[(*linearToTarget)[linearIdx]];
-            }
-        } else if (methodFlag == 1) {
-            // Backward compatibility for old rectangular Hilbert archives.
-            vector<MapInfo> mapping(blockCount);
-            for (size_t i = 0; i < blockCount; ++i) {
-                uint32_t y = static_cast<uint32_t>(i / blocksW);
-                uint32_t x = static_cast<uint32_t>(i % blocksW);
-                mapping[i].linearIdx = static_cast<uint32_t>(i);
-                mapping[i].sortKey =
-                    ScanAlgorithms::getHilbertIndexForRect(
-                        blocksW, blocksH, x, y);
-            }
-            sort(mapping.begin(), mapping.end());
-            for (size_t i = 0; i < blockCount; ++i) {
-                restoredBlocks[mapping[i].linearIdx] = sortedBlocks[i];
-            }
-        } else {
-            return false;
-        }
-    }
-
-    unique_ptr<uint8_t[]> outBuf(new uint8_t[128 + blockCount * blockSize]);
-    size_t outOffset = 0;
-    memcpy(outBuf.get(), header, 128);
-    outOffset += 128;
-
-    for (const auto& b : restoredBlocks) {
-        if (isBC3) {
-            outBuf[outOffset++] = b.a0;
-            outBuf[outOffset++] = b.a1;
-            memcpy(outBuf.get() + outOffset, &b.a_idx, 6);
-            outOffset += 6;
-            memcpy(outBuf.get() + outOffset, &b.c0, 2);
-            outOffset += 2;
-            memcpy(outBuf.get() + outOffset, &b.c1, 2);
-            outOffset += 2;
-            memcpy(outBuf.get() + outOffset, &b.c_idx, 4);
-            outOffset += 4;
-        } else if (isBC4) {
-            outBuf[outOffset++] = b.a0;
-            outBuf[outOffset++] = b.a1;
-            memcpy(outBuf.get() + outOffset, &b.a_idx, 6);
-            outOffset += 6;
-        } else {
-            memcpy(outBuf.get() + outOffset, &b.c0, 2);
-            outOffset += 2;
-            memcpy(outBuf.get() + outOffset, &b.c1, 2);
-            outOffset += 2;
-            memcpy(outBuf.get() + outOffset, &b.c_idx, 4);
-            outOffset += 4;
-        }
-    }
-
-    error_code ec;
-    fs::create_directories(outputPath.parent_path(), ec);
-    return !ec && WriteWholeFile(outputPath, outBuf.get(), outOffset);
 }
 
 bool RestoreOurPreprocessedBin(const fs::path& binPath,

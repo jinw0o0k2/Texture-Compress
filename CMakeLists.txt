@@ -47,9 +47,3 @@ add_executable(overhead_benchmark overhead_benchmark.cpp)
 target_link_libraries(
     overhead_benchmark
     PRIVATE lz4_static libzstd_static Threads::Threads)
-
-add_executable(
-    sampling_comparison_benchmark sampling_comparison_benchmark.cpp)
-target_link_libraries(
-    sampling_comparison_benchmark
-    PRIVATE lz4_static libzstd_static Threads::Threads)

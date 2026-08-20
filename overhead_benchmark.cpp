@@ -5,7 +5,6 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
-#include <sstream>
 
 #include "PreprocessedRestore.hpp"
 
