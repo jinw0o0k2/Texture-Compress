@@ -16,13 +16,31 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-struct BlockData {
-    uint32_t originalLinearIdx;
-    uint16_t c0, c1;
-    uint32_t c_idx;
-    uint8_t a0, a1;
-    uint64_t a_idx;
+enum class BcFormat {
+    BC1,
+    BC3,
+    BC4,
 };
+
+bool DetectBcFormat(uint32_t fourCC, BcFormat& format) {
+    if (fourCC == 0x31545844) { // DXT1 / BC1
+        format = BcFormat::BC1;
+        return true;
+    }
+    if (fourCC == 0x35545844) { // DXT5 / BC3
+        format = BcFormat::BC3;
+        return true;
+    }
+    if (fourCC == 0x31495441 || fourCC == 0x55344342) { // ATI1 / BC4U
+        format = BcFormat::BC4;
+        return true;
+    }
+    return false;
+}
+
+size_t BcBlockSize(BcFormat format) {
+    return format == BcFormat::BC3 ? 16U : 8U;
+}
 
 static string exe7z = "C:\\Program Files\\7-Zip\\7z.exe";
 static string exePigz = "pigz";
@@ -148,52 +166,21 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
 
     if (width == 0 || height == 0) return false;
 
-    bool isBC3 = false;
-    bool isBC4 = false;
-    int blockSize = 8;
-    if (fourCC == 0x35545844) { // DXT5 / BC3
-        isBC3 = true;
-        blockSize = 16;
-    } else if (fourCC == 0x31495441 || fourCC == 0x55344342) { // ATI1 / BC4U
-        isBC4 = true;
-    }
+    BcFormat format = BcFormat::BC1;
+    if (!DetectBcFormat(fourCC, format)) return false;
+    const size_t blockSize = BcBlockSize(format);
 
     uint32_t blocksW = (width + 3) / 4;
     uint32_t blocksH = (height + 3) / 4;
     size_t fileSize = originBuffer.size();
     size_t payloadSize = fileSize - 128;
-    if (payloadSize % static_cast<size_t>(blockSize) != 0) return false;
+    if (payloadSize % blockSize != 0) return false;
 
-    size_t blockCount = payloadSize / static_cast<size_t>(blockSize);
+    size_t blockCount = payloadSize / blockSize;
     if (blockCount == 0 || blockCount > UINT32_MAX) return false;
-    uint8_t* dPtr = originBuffer.data() + 128;
+    const uint8_t* dPtr = originBuffer.data() + 128;
 
-    vector<BlockData> blocks(blockCount);
-    for (size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
-        BlockData b{};
-        b.originalLinearIdx = static_cast<uint32_t>(linearIdx);
-        size_t offset = linearIdx * static_cast<size_t>(blockSize);
-
-        if (isBC3) {
-            b.a0 = dPtr[offset];
-            b.a1 = dPtr[offset + 1];
-            memcpy(&b.a_idx, dPtr + offset + 2, 6);
-            memcpy(&b.c0, dPtr + offset + 8, 2);
-            memcpy(&b.c1, dPtr + offset + 10, 2);
-            memcpy(&b.c_idx, dPtr + offset + 12, 4);
-        } else if (isBC4) {
-            b.a0 = dPtr[offset];
-            b.a1 = dPtr[offset + 1];
-            memcpy(&b.a_idx, dPtr + offset + 2, 6);
-        } else {
-            memcpy(&b.c0, dPtr + offset, 2);
-            memcpy(&b.c1, dPtr + offset + 2, 2);
-            memcpy(&b.c_idx, dPtr + offset + 4, 4);
-        }
-        blocks[linearIdx] = b;
-    }
-
-    const size_t bytesPerBlock = isBC3 ? 16 : 8;
+    const size_t bytesPerBlock = blockSize;
     const size_t totalBufferSize = blockCount * bytesPerBlock;
     const size_t expectedTopLevelBlocks =
         static_cast<size_t>(blocksW) * blocksH;
@@ -250,27 +237,13 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
     auto CalculateSizeInMemory = [&](int method) -> long {
         const size_t simulationBufferSize = sampleCount * bytesPerBlock;
         unique_ptr<uint8_t[]> simBuf(new uint8_t[simulationBufferSize]);
-        size_t offset = 0;
         for (size_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
             const size_t orderedIdx =
                 sampleIdx * blockCount / sampleCount;
-            const BlockData& b = blocks[LinearIndexAt(method, orderedIdx)];
-            if (isBC3 || isBC4) {
-                simBuf[offset++] = b.a0;
-                simBuf[offset++] = b.a1;
-                memcpy(simBuf.get() + offset, &b.a_idx, 6);
-                offset += 6;
-            }
-            if (!isBC4) {
-                memcpy(simBuf.get() + offset, &b.c0, 2);
-                offset += 2;
-                memcpy(simBuf.get() + offset, &b.c1, 2);
-                offset += 2;
-                memcpy(simBuf.get() + offset, &b.c_idx, 4);
-                offset += 4;
-            }
+            const size_t sourceIdx = LinearIndexAt(method, orderedIdx);
+            memcpy(simBuf.get() + sampleIdx * blockSize,
+                   dPtr + sourceIdx * blockSize, blockSize);
         }
-        if (offset != simulationBufferSize) return 0;
 
         if (simulationCodec == "zstd") {
             const size_t compressedCapacity =
@@ -327,44 +300,45 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
         if (simulatedSizes) *simulatedSizes = sizes;
     }
 
-    auto FinalBlockAt = [&](size_t orderedIdx) -> const BlockData& {
-        return blocks[LinearIndexAt(bestMethod, orderedIdx)];
+    auto SourceBlockAt = [&](size_t orderedIdx) -> const uint8_t* {
+        const size_t sourceIdx = LinearIndexAt(bestMethod, orderedIdx);
+        return dPtr + sourceIdx * blockSize;
     };
 
     finalData.resize(128 + 1 + totalBufferSize);
-    size_t finalOffset = 0;
-    memcpy(finalData.data() + finalOffset, header, 128);
-    finalOffset += 128;
-    finalData[finalOffset++] = static_cast<uint8_t>(bestMethod);
+    memcpy(finalData.data(), header, 128);
+    finalData[128] = static_cast<uint8_t>(bestMethod);
 
-    if (isBC3 || isBC4) {
+    size_t alphaEndpointBase = 129;
+    size_t alphaIndexBase = alphaEndpointBase + blockCount * 2;
+    size_t colorEndpointBase = 129;
+    if (format == BcFormat::BC3) {
+        colorEndpointBase = alphaIndexBase + blockCount * 6;
+    }
+    const size_t colorIndexBase = colorEndpointBase + blockCount * 4;
+
+    if (format == BcFormat::BC3 || format == BcFormat::BC4) {
         for (size_t i = 0; i < blockCount; ++i) {
-            const auto& b = FinalBlockAt(i);
-            finalData[finalOffset++] = b.a0;
-            finalData[finalOffset++] = b.a1;
-        }
-        for (size_t i = 0; i < blockCount; ++i) {
-            const auto& b = FinalBlockAt(i);
-            memcpy(finalData.data() + finalOffset, &b.a_idx, 6);
-            finalOffset += 6;
+            const uint8_t* source = SourceBlockAt(i);
+            memcpy(finalData.data() + alphaEndpointBase + i * 2,
+                   source, 2);
+            memcpy(finalData.data() + alphaIndexBase + i * 6,
+                   source + 2, 6);
         }
     }
-    if (!isBC4) {
+    if (format != BcFormat::BC4) {
+        const size_t sourceColorOffset =
+            format == BcFormat::BC3 ? 8U : 0U;
         for (size_t i = 0; i < blockCount; ++i) {
-            const auto& b = FinalBlockAt(i);
-            memcpy(finalData.data() + finalOffset, &b.c0, 2);
-            finalOffset += 2;
-            memcpy(finalData.data() + finalOffset, &b.c1, 2);
-            finalOffset += 2;
-        }
-        for (size_t i = 0; i < blockCount; ++i) {
-            const auto& b = FinalBlockAt(i);
-            memcpy(finalData.data() + finalOffset, &b.c_idx, 4);
-            finalOffset += 4;
+            const uint8_t* source = SourceBlockAt(i) + sourceColorOffset;
+            memcpy(finalData.data() + colorEndpointBase + i * 4,
+                   source, 4);
+            memcpy(finalData.data() + colorIndexBase + i * 4,
+                   source + 4, 4);
         }
     }
 
-    return finalOffset == finalData.size();
+    return true;
 }
 
 bool BuildOurPreprocessedBin(const fs::path& inputPath,

@@ -3,18 +3,38 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "ScanAlgorithms.hpp"
 
 namespace PreprocessedRestore {
 
-struct BlockData {
-    std::uint16_t c0 = 0, c1 = 0;
-    std::uint32_t cIdx = 0;
-    std::uint8_t a0 = 0, a1 = 0;
-    std::uint64_t aIdx = 0;
+enum class BcFormat {
+    BC1,
+    BC3,
+    BC4,
 };
+
+inline bool DetectBcFormat(std::uint32_t fourCC, BcFormat& format) {
+    if (fourCC == 0x31545844) {
+        format = BcFormat::BC1;
+        return true;
+    }
+    if (fourCC == 0x35545844) {
+        format = BcFormat::BC3;
+        return true;
+    }
+    if (fourCC == 0x31495441 || fourCC == 0x55344342) {
+        format = BcFormat::BC4;
+        return true;
+    }
+    return false;
+}
+
+inline std::size_t BcBlockSize(BcFormat format) {
+    return format == BcFormat::BC3 ? 16U : 8U;
+}
 
 struct MapInfo {
     std::uint32_t linearIdx = 0;
@@ -43,70 +63,32 @@ inline bool ToDds(const std::vector<std::uint8_t>& buffer,
     std::memcpy(&fourCC, header + 84, sizeof(fourCC));
     if (width == 0 || height == 0) return false;
 
-    bool isBC3 = false;
-    bool isBC4 = false;
-    int blockSize = 8;
-    if (fourCC == 0x35545844) {
-        isBC3 = true;
-        blockSize = 16;
-    } else if (fourCC == 0x31495441 || fourCC == 0x55344342) {
-        isBC4 = true;
-    }
+    BcFormat format = BcFormat::BC1;
+    if (!DetectBcFormat(fourCC, format)) return false;
+    const std::size_t blockSize = BcBlockSize(format);
 
     const std::size_t packedPayloadSize = buffer.size() - 129;
-    if (packedPayloadSize % static_cast<std::size_t>(blockSize) != 0) {
+    if (packedPayloadSize % blockSize != 0) {
         return false;
     }
 
     const std::uint32_t blocksW = (width + 3) / 4;
     const std::uint32_t blocksH = (height + 3) / 4;
     const std::size_t blockCount =
-        packedPayloadSize / static_cast<std::size_t>(blockSize);
+        packedPayloadSize / blockSize;
     if (blockCount == 0) return false;
 
-    std::vector<BlockData> orderedBlocks(blockCount);
-    std::size_t offset = 129;
-    if (isBC3 || isBC4) {
-        for (std::size_t i = 0; i < blockCount; ++i) {
-            orderedBlocks[i].a0 = buffer[offset++];
-            orderedBlocks[i].a1 = buffer[offset++];
-        }
-        for (std::size_t i = 0; i < blockCount; ++i) {
-            std::memcpy(&orderedBlocks[i].aIdx, buffer.data() + offset, 6);
-            offset += 6;
-        }
-    }
-    if (!isBC4) {
-        for (std::size_t i = 0; i < blockCount; ++i) {
-            std::memcpy(&orderedBlocks[i].c0, buffer.data() + offset, 2);
-            offset += 2;
-            std::memcpy(&orderedBlocks[i].c1, buffer.data() + offset, 2);
-            offset += 2;
-        }
-        for (std::size_t i = 0; i < blockCount; ++i) {
-            std::memcpy(&orderedBlocks[i].cIdx, buffer.data() + offset, 4);
-            offset += 4;
-        }
-    }
-    if (offset != buffer.size()) return false;
-
-    std::vector<BlockData> restoredBlocks(blockCount);
-    if (methodFlag == 0) {
-        restoredBlocks = std::move(orderedBlocks);
-    } else if (methodFlag == 1 || methodFlag == 2) {
+    std::shared_ptr<const std::vector<std::uint32_t>> linearToTarget;
+    std::vector<std::uint32_t> legacyLinearToTarget;
+    if (methodFlag == 1 || methodFlag == 2) {
         const std::size_t expectedBlocks =
             static_cast<std::size_t>(blocksW) * blocksH;
         if (blocksW == blocksH && ScanAlgorithms::isPowerOfTwo(blocksW) &&
             blockCount == expectedBlocks) {
-            auto linearToTarget = methodFlag == 1
+            linearToTarget = methodFlag == 1
                 ? ScanAlgorithms::getHilbertLinearToTargetLut(blocksW)
                 : ScanAlgorithms::getZOrderLinearToTargetLut(blocksW);
             if (linearToTarget->size() != blockCount) return false;
-            for (std::size_t linearIdx = 0; linearIdx < blockCount;
-                 ++linearIdx) {
-                restoredBlocks[linearIdx] =
-                    orderedBlocks[(*linearToTarget)[linearIdx]];
-            }
         } else if (methodFlag == 1) {
             // Backward compatibility for old rectangular Hilbert archives.
             std::vector<MapInfo> mapping(blockCount);
@@ -120,45 +102,69 @@ inline bool ToDds(const std::vector<std::uint8_t>& buffer,
                     blocksW, blocksH, x, y);
             }
             std::sort(mapping.begin(), mapping.end());
-            for (std::size_t i = 0; i < blockCount; ++i) {
-                restoredBlocks[mapping[i].linearIdx] = orderedBlocks[i];
+            legacyLinearToTarget.resize(blockCount);
+            for (std::size_t orderedIdx = 0; orderedIdx < blockCount;
+                 ++orderedIdx) {
+                legacyLinearToTarget[mapping[orderedIdx].linearIdx] =
+                    static_cast<std::uint32_t>(orderedIdx);
             }
         } else {
             return false;
         }
     }
 
-    dds.resize(128 + blockCount * static_cast<std::size_t>(blockSize));
-    std::size_t outOffset = 0;
+    const std::size_t alphaEndpointBase = 129;
+    const std::size_t alphaIndexBase =
+        alphaEndpointBase + blockCount * 2;
+    std::size_t colorEndpointBase = 129;
+    if (format == BcFormat::BC3) {
+        colorEndpointBase = alphaIndexBase + blockCount * 6;
+    }
+    const std::size_t colorIndexBase =
+        colorEndpointBase + blockCount * 4;
+
+    dds.resize(128 + blockCount * blockSize);
     std::memcpy(dds.data(), header, 128);
-    outOffset += 128;
-    for (const auto& block : restoredBlocks) {
-        if (isBC3) {
-            dds[outOffset++] = block.a0;
-            dds[outOffset++] = block.a1;
-            std::memcpy(dds.data() + outOffset, &block.aIdx, 6);
-            outOffset += 6;
-            std::memcpy(dds.data() + outOffset, &block.c0, 2);
-            outOffset += 2;
-            std::memcpy(dds.data() + outOffset, &block.c1, 2);
-            outOffset += 2;
-            std::memcpy(dds.data() + outOffset, &block.cIdx, 4);
-            outOffset += 4;
-        } else if (isBC4) {
-            dds[outOffset++] = block.a0;
-            dds[outOffset++] = block.a1;
-            std::memcpy(dds.data() + outOffset, &block.aIdx, 6);
-            outOffset += 6;
+    for (std::size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
+        std::size_t orderedIdx = linearIdx;
+        if (linearToTarget) {
+            orderedIdx = (*linearToTarget)[linearIdx];
+        } else if (!legacyLinearToTarget.empty()) {
+            orderedIdx = legacyLinearToTarget[linearIdx];
+        }
+
+        std::uint8_t* destination =
+            dds.data() + 128 + linearIdx * blockSize;
+        if (format == BcFormat::BC3) {
+            std::memcpy(destination,
+                        buffer.data() + alphaEndpointBase + orderedIdx * 2,
+                        2);
+            std::memcpy(destination + 2,
+                        buffer.data() + alphaIndexBase + orderedIdx * 6,
+                        6);
+            std::memcpy(destination + 8,
+                        buffer.data() + colorEndpointBase + orderedIdx * 4,
+                        4);
+            std::memcpy(destination + 12,
+                        buffer.data() + colorIndexBase + orderedIdx * 4,
+                        4);
+        } else if (format == BcFormat::BC4) {
+            std::memcpy(destination,
+                        buffer.data() + alphaEndpointBase + orderedIdx * 2,
+                        2);
+            std::memcpy(destination + 2,
+                        buffer.data() + alphaIndexBase + orderedIdx * 6,
+                        6);
         } else {
-            std::memcpy(dds.data() + outOffset, &block.c0, 2);
-            outOffset += 2;
-            std::memcpy(dds.data() + outOffset, &block.c1, 2);
-            outOffset += 2;
-            std::memcpy(dds.data() + outOffset, &block.cIdx, 4);
-            outOffset += 4;
+            std::memcpy(destination,
+                        buffer.data() + colorEndpointBase + orderedIdx * 4,
+                        4);
+            std::memcpy(destination + 4,
+                        buffer.data() + colorIndexBase + orderedIdx * 4,
+                        4);
         }
     }
-    return outOffset == dds.size();
+    return true;
 }
 
 } // namespace PreprocessedRestore
