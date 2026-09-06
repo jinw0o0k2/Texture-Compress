@@ -183,6 +183,31 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\zstd1_zstd_sim.csv" zstd 1 5 10
 
 원시 CSV와 파일별 평균 summary CSV를 생성합니다.
 
+## BC 블록 멀티스레딩
+
+인코더의 최종 planar 분리와 디코더의 BC 블록 복원은 블록이 131,072개
+이상인 텍스처에서 병렬 처리합니다. DDS 파일 입출력, 헤더 분석 및 작은
+텍스처는 단일 스레드로 유지합니다. 작업은 65,536블록 단위 청크로 나누며,
+각 작업은 겹치지 않는 출력 범위에 기록하므로 mutex가 필요하지 않습니다.
+
+기본 스레드 상한은 `std::thread::hardware_concurrency()`입니다. 동일한
+실행 파일로 단일 스레드와 멀티스레드를 비교하려면 실행 전에
+`TEXTURE_BLOCK_THREADS`를 설정합니다.
+
+```bat
+set TEXTURE_BLOCK_THREADS=1
+overhead_benchmark.exe "C:\Textures" "C:\Results\blocks_st.csv" zstd 1 5 10 lz4
+
+set TEXTURE_BLOCK_THREADS=24
+overhead_benchmark.exe "C:\Textures" "C:\Results\blocks_mt24.csv" zstd 1 5 10 lz4
+```
+
+자동 설정으로 되돌리려면 환경 변수를 비웁니다.
+
+```bat
+set TEXTURE_BLOCK_THREADS=
+```
+
 ## 실험 결과 관리
 
 기존 결과는 `results/`에 유지합니다. 새 결과를 Git에 추가할 때는 날짜와

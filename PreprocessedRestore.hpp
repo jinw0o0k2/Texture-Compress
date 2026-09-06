@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 
+#include "ParallelBlocks.hpp"
 #include "ScanAlgorithms.hpp"
 
 namespace PreprocessedRestore {
@@ -125,45 +126,48 @@ inline bool ToDds(const std::vector<std::uint8_t>& buffer,
 
     dds.resize(128 + blockCount * blockSize);
     std::memcpy(dds.data(), header, 128);
-    for (std::size_t linearIdx = 0; linearIdx < blockCount; ++linearIdx) {
-        std::size_t orderedIdx = linearIdx;
-        if (linearToTarget) {
-            orderedIdx = (*linearToTarget)[linearIdx];
-        } else if (!legacyLinearToTarget.empty()) {
-            orderedIdx = legacyLinearToTarget[linearIdx];
-        }
+    ParallelBlocks::ForRanges(
+        blockCount, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t linearIdx = begin; linearIdx < end; ++linearIdx) {
+            std::size_t orderedIdx = linearIdx;
+            if (linearToTarget) {
+                orderedIdx = (*linearToTarget)[linearIdx];
+            } else if (!legacyLinearToTarget.empty()) {
+                orderedIdx = legacyLinearToTarget[linearIdx];
+            }
 
-        std::uint8_t* destination =
-            dds.data() + 128 + linearIdx * blockSize;
-        if (format == BcFormat::BC3) {
-            std::memcpy(destination,
-                        buffer.data() + alphaEndpointBase + orderedIdx * 2,
-                        2);
-            std::memcpy(destination + 2,
-                        buffer.data() + alphaIndexBase + orderedIdx * 6,
-                        6);
-            std::memcpy(destination + 8,
-                        buffer.data() + colorEndpointBase + orderedIdx * 4,
-                        4);
-            std::memcpy(destination + 12,
-                        buffer.data() + colorIndexBase + orderedIdx * 4,
-                        4);
-        } else if (format == BcFormat::BC4) {
-            std::memcpy(destination,
-                        buffer.data() + alphaEndpointBase + orderedIdx * 2,
-                        2);
-            std::memcpy(destination + 2,
-                        buffer.data() + alphaIndexBase + orderedIdx * 6,
-                        6);
-        } else {
-            std::memcpy(destination,
-                        buffer.data() + colorEndpointBase + orderedIdx * 4,
-                        4);
-            std::memcpy(destination + 4,
-                        buffer.data() + colorIndexBase + orderedIdx * 4,
-                        4);
+            std::uint8_t* destination =
+                dds.data() + 128 + linearIdx * blockSize;
+            if (format == BcFormat::BC3) {
+                std::memcpy(destination,
+                            buffer.data() + alphaEndpointBase + orderedIdx * 2,
+                            2);
+                std::memcpy(destination + 2,
+                            buffer.data() + alphaIndexBase + orderedIdx * 6,
+                            6);
+                std::memcpy(destination + 8,
+                            buffer.data() + colorEndpointBase + orderedIdx * 4,
+                            4);
+                std::memcpy(destination + 12,
+                            buffer.data() + colorIndexBase + orderedIdx * 4,
+                            4);
+            } else if (format == BcFormat::BC4) {
+                std::memcpy(destination,
+                            buffer.data() + alphaEndpointBase + orderedIdx * 2,
+                            2);
+                std::memcpy(destination + 2,
+                            buffer.data() + alphaIndexBase + orderedIdx * 6,
+                            6);
+            } else {
+                std::memcpy(destination,
+                            buffer.data() + colorEndpointBase + orderedIdx * 4,
+                            4);
+                std::memcpy(destination + 4,
+                            buffer.data() + colorIndexBase + orderedIdx * 4,
+                            4);
+            }
         }
-    }
+    });
     return true;
 }
 

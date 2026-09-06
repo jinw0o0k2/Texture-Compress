@@ -11,6 +11,7 @@
 #include "lz4.h"
 #include "PackedLz4.hpp"
 #include "PackedZstd.hpp"
+#include "ParallelBlocks.hpp"
 #include "ScanAlgorithms.hpp"
 
 using namespace std;
@@ -317,26 +318,26 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
     }
     const size_t colorIndexBase = colorEndpointBase + blockCount * 4;
 
-    if (format == BcFormat::BC3 || format == BcFormat::BC4) {
-        for (size_t i = 0; i < blockCount; ++i) {
+    ParallelBlocks::ForRanges(blockCount, [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
             const uint8_t* source = SourceBlockAt(i);
-            memcpy(finalData.data() + alphaEndpointBase + i * 2,
-                   source, 2);
-            memcpy(finalData.data() + alphaIndexBase + i * 6,
-                   source + 2, 6);
+            if (format == BcFormat::BC3 || format == BcFormat::BC4) {
+                memcpy(finalData.data() + alphaEndpointBase + i * 2,
+                       source, 2);
+                memcpy(finalData.data() + alphaIndexBase + i * 6,
+                       source + 2, 6);
+            }
+            if (format != BcFormat::BC4) {
+                const size_t sourceColorOffset =
+                    format == BcFormat::BC3 ? 8U : 0U;
+                const uint8_t* colorSource = source + sourceColorOffset;
+                memcpy(finalData.data() + colorEndpointBase + i * 4,
+                       colorSource, 4);
+                memcpy(finalData.data() + colorIndexBase + i * 4,
+                       colorSource + 4, 4);
+            }
         }
-    }
-    if (format != BcFormat::BC4) {
-        const size_t sourceColorOffset =
-            format == BcFormat::BC3 ? 8U : 0U;
-        for (size_t i = 0; i < blockCount; ++i) {
-            const uint8_t* source = SourceBlockAt(i) + sourceColorOffset;
-            memcpy(finalData.data() + colorEndpointBase + i * 4,
-                   source, 4);
-            memcpy(finalData.data() + colorIndexBase + i * 4,
-                   source + 4, 4);
-        }
-    }
+    });
 
     return true;
 }
