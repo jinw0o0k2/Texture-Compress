@@ -3,10 +3,19 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#include <immintrin.h>
+#define TEXTURE_MSVC_BMI2 1
+#else
+#define TEXTURE_MSVC_BMI2 0
+#endif
 
 class ScanAlgorithms {
 public:
@@ -15,6 +24,18 @@ public:
     }
 
     static uint64_t getZOrderIndex(uint32_t x, uint32_t y) {
+#if TEXTURE_MSVC_BMI2
+        static const bool usePdep = [] {
+            if (std::getenv("TEXTURE_DISABLE_PDEP") != nullptr) return false;
+            int registers[4] = {};
+            __cpuidex(registers, 7, 0);
+            return (registers[1] & (1 << 8)) != 0; // BMI2
+        }();
+        if (usePdep) {
+            return static_cast<uint64_t>(_pdep_u32(x, 0x55555555U)) |
+                   static_cast<uint64_t>(_pdep_u32(y, 0xAAAAAAAAU));
+        }
+#endif
         auto spreadBits = [](uint32_t value) -> uint64_t {
             uint64_t bits = value;
             bits = (bits | (bits << 16)) & 0x0000FFFF0000FFFFULL;
@@ -161,5 +182,7 @@ public:
         return lut;
     }
 };
+
+#undef TEXTURE_MSVC_BMI2
 
 #endif

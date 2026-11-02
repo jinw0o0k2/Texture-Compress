@@ -18,9 +18,11 @@ DDS의 BC 압축 블록을 Scanline, Hilbert 또는 Z-order로 배치하고 채�
    - 한 변의 블록 수가 2의 거듭제곱
    - 페이로드 블록 수가 `blocksW * blocksH`와 동일
 3. 조건을 만족하지 않으면 후보 시뮬레이션 없이 Scanline으로 고정합니다.
-4. 조건을 만족하면 전체 블록에서 균일하게 추출한 20% 샘플을 사용해
-   Scanline, Hilbert, Z-order를 비교합니다. 시뮬레이션 엔진은 기본 LZ4이며
-   CLI에서 단일 스레드 Zstd level 1로 변경할 수 있습니다.
+4. 조건을 만족하면 여러 위치에서 연속된 최대 64블록 Chunk를 추출해
+   Scanline, Hilbert, Z-order를 비교합니다. 기본 `diff` 엔진은 연속 BC
+   블록의 endpoint 차이와 index 일치 여부로 후보를 평가합니다. CLI에서
+   LZ4 또는 단일 스레드 Zstd level 1의 실제 샘플 압축 비교도 선택할 수
+   있습니다.
 5. 더 작은 후보를 선택하고 전체 블록을 해당 순서로 배치합니다.
 6. 전처리 데이터를 파일로 왕복시키지 않고 선택한 코덱으로 같은 프로세스
    안에서 압축합니다. 출력은 `.packed.lz4`, `.packed.lz4hc` 또는
@@ -97,7 +99,7 @@ cmake --build build --config Release
 ## 인코더 사용법
 
 ```text
-encoder.exe <input.dds|folder> [output_folder] [lz4|lz4hc|zstd|pigz|7z] [level] [auto|scanline|hilbert|zorder] [sample=20|10|100] [simulation=lz4|zstd]
+encoder.exe <input.dds|folder> [output_folder] [lz4|lz4hc|zstd|pigz|7z] [level] [auto|scanline|hilbert|zorder] [sample=20|10|100] [simulation=diff|lz4|zstd]
 ```
 
 기본 설정으로 폴더 전체 인코딩:
@@ -131,6 +133,7 @@ encoder.exe "C:\Textures" "C:\EncodedLz4" lz4 0 auto 10
 encoder.exe "C:\Textures" "C:\EncodedLz4hc" lz4hc 3 auto 10
 encoder.exe "C:\Textures" "C:\EncodedZstd" zstd 1 auto 10 lz4
 encoder.exe "C:\Textures" "C:\EncodedZstdSim" zstd 1 auto 10 zstd
+encoder.exe "C:\Textures" "C:\EncodedDiff" zstd 1 auto 10 diff
 ```
 
 ## 디코더 사용법
@@ -156,7 +159,7 @@ decoder.exe "C:\Encoded\texture.dds.packed.lz4" "C:\Restored"
 ## 오버헤드 측정
 
 ```text
-overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [lz4|lz4hc|zstd] [level] [runs=5] [sample=20] [simulation=lz4|zstd]
+overhead_benchmark.exe <input.dds|folder> [raw_csv=overhead_raw.csv] [lz4|lz4hc|zstd] [level] [runs=5] [sample=20] [simulation=diff|lz4|zstd]
 ```
 
 10% 샘플을 파일당 5회 측정:
@@ -177,7 +180,7 @@ overhead_benchmark.exe "C:\Textures" "C:\Results\zstd1_zstd_sim.csv" zstd 1 5 10
 - `decode_write_ms`: 복원된 DDS를 파일로 쓰는 시간
 - `total_decode_ms`: `decode_core_ms`와 `decode_write_ms`의 합
 - `compressed_bytes`, `ratio`: 최종 크기와 압축 배율
-- `simulation_engine`: 후보 비교에 사용한 LZ4 또는 단일 스레드 Zstd
+- `simulation_engine`: 후보 비교에 사용한 Diff, LZ4 또는 단일 스레드 Zstd
 - `scan_method`: 실제 선택된 Scanline, Hilbert 또는 Z-order
 - `verified`: 복원 결과가 원본과 같은지 여부
 
@@ -231,6 +234,11 @@ results/2026-08-20_lz4-vs-zstd-simulation/
 
 - BC1/DXT1, BC3/DXT5, BC4/ATI1·BC4U를 지원합니다. 다른 FourCC는
   잘못된 BC1 데이터로 처리하지 않고 명시적으로 거부합니다.
+- BC3는 컬러와 알파를 포함한 16바이트 블록이며, BC4는 알파에 한정되지
+  않는 임의의 단일 채널용 8바이트 블록입니다.
+- Windows MSVC 빌드에서는 BMI2를 지원하는 CPU에서 Z-order 계산에 PDEP를
+  사용합니다. PDEP가 느린 CPU에서는 `set TEXTURE_DISABLE_PDEP=1`로 기존
+  shift/mask 경로를 강제할 수 있습니다.
 - 128바이트 DDS 헤더를 전제로 합니다.
 - DX10 확장 헤더는 지원하지 않습니다.
 - 밉맵이나 배열·큐브 텍스처처럼 추가 서브리소스가 감지되면 Hilbert와

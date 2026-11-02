@@ -6,6 +6,13 @@
 #include <memory>
 #include <vector>
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#define TEXTURE_X86_SIMD 1
+#else
+#define TEXTURE_X86_SIMD 0
+#endif
+
 #include "ParallelBlocks.hpp"
 #include "ScanAlgorithms.hpp"
 
@@ -35,6 +42,24 @@ inline bool DetectBcFormat(std::uint32_t fourCC, BcFormat& format) {
 
 inline std::size_t BcBlockSize(BcFormat format) {
     return format == BcFormat::BC3 ? 16U : 8U;
+}
+
+inline std::uint16_t Load16(const std::uint8_t* source) {
+    std::uint16_t value = 0;
+    std::memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+inline std::uint32_t Load32(const std::uint8_t* source) {
+    std::uint32_t value = 0;
+    std::memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+inline std::uint64_t Load48(const std::uint8_t* source) {
+    std::uint64_t value = 0;
+    std::memcpy(&value, source, 6);
+    return value;
 }
 
 struct MapInfo {
@@ -126,49 +151,62 @@ inline bool ToDds(const std::vector<std::uint8_t>& buffer,
 
     dds.resize(128 + blockCount * blockSize);
     std::memcpy(dds.data(), header, 128);
+    const std::uint32_t* map = linearToTarget
+        ? linearToTarget->data()
+        : (legacyLinearToTarget.empty()
+            ? nullptr
+            : legacyLinearToTarget.data());
+    const std::uint8_t* source = buffer.data();
+    std::uint8_t* destinationBlocks = dds.data() + 128;
+
     ParallelBlocks::ForRanges(
         blockCount, [&](std::size_t begin, std::size_t end) {
-        for (std::size_t linearIdx = begin; linearIdx < end; ++linearIdx) {
-            std::size_t orderedIdx = linearIdx;
-            if (linearToTarget) {
-                orderedIdx = (*linearToTarget)[linearIdx];
-            } else if (!legacyLinearToTarget.empty()) {
-                orderedIdx = legacyLinearToTarget[linearIdx];
-            }
+            for (std::size_t linearIdx = begin; linearIdx < end; ++linearIdx) {
+                const std::size_t orderedIdx = map
+                    ? map[linearIdx]
+                    : linearIdx;
+                std::uint8_t* destination =
+                    destinationBlocks + linearIdx * blockSize;
 
-            std::uint8_t* destination =
-                dds.data() + 128 + linearIdx * blockSize;
-            if (format == BcFormat::BC3) {
-                std::memcpy(destination,
-                            buffer.data() + alphaEndpointBase + orderedIdx * 2,
-                            2);
-                std::memcpy(destination + 2,
-                            buffer.data() + alphaIndexBase + orderedIdx * 6,
-                            6);
-                std::memcpy(destination + 8,
-                            buffer.data() + colorEndpointBase + orderedIdx * 4,
-                            4);
-                std::memcpy(destination + 12,
-                            buffer.data() + colorIndexBase + orderedIdx * 4,
-                            4);
-            } else if (format == BcFormat::BC4) {
-                std::memcpy(destination,
-                            buffer.data() + alphaEndpointBase + orderedIdx * 2,
-                            2);
-                std::memcpy(destination + 2,
-                            buffer.data() + alphaIndexBase + orderedIdx * 6,
-                            6);
-            } else {
-                std::memcpy(destination,
-                            buffer.data() + colorEndpointBase + orderedIdx * 4,
-                            4);
-                std::memcpy(destination + 4,
-                            buffer.data() + colorIndexBase + orderedIdx * 4,
-                            4);
+                if (format == BcFormat::BC3) {
+                    const std::uint64_t alpha =
+                        static_cast<std::uint64_t>(Load16(
+                            source + alphaEndpointBase + orderedIdx * 2)) |
+                        (Load48(source + alphaIndexBase + orderedIdx * 6) << 16);
+                    const std::uint64_t color =
+                        static_cast<std::uint64_t>(Load32(
+                            source + colorEndpointBase + orderedIdx * 4)) |
+                        (static_cast<std::uint64_t>(Load32(
+                            source + colorIndexBase + orderedIdx * 4)) << 32);
+#if TEXTURE_X86_SIMD
+                    const __m128i block = _mm_set_epi64x(
+                        static_cast<long long>(color),
+                        static_cast<long long>(alpha));
+                    _mm_storeu_si128(
+                        reinterpret_cast<__m128i*>(destination), block);
+#else
+                    std::memcpy(destination, &alpha, 8);
+                    std::memcpy(destination + 8, &color, 8);
+#endif
+                } else if (format == BcFormat::BC4) {
+                    const std::uint64_t alpha =
+                        static_cast<std::uint64_t>(Load16(
+                            source + alphaEndpointBase + orderedIdx * 2)) |
+                        (Load48(source + alphaIndexBase + orderedIdx * 6) << 16);
+                    std::memcpy(destination, &alpha, 8);
+                } else {
+                    const std::uint64_t color =
+                        static_cast<std::uint64_t>(Load32(
+                            source + colorEndpointBase + orderedIdx * 4)) |
+                        (static_cast<std::uint64_t>(Load32(
+                            source + colorIndexBase + orderedIdx * 4)) << 32);
+                    std::memcpy(destination, &color, 8);
+                }
             }
-        }
-    });
+        });
     return true;
 }
 
 } // namespace PreprocessedRestore
+
+#undef TEXTURE_X86_SIMD

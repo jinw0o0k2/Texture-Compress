@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,6 +15,13 @@
 #include "PackedZstd.hpp"
 #include "ParallelBlocks.hpp"
 #include "ScanAlgorithms.hpp"
+
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#define TEXTURE_X86_SIMD 1
+#else
+#define TEXTURE_X86_SIMD 0
+#endif
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -49,10 +58,12 @@ static int compressionLevel = 7;
 static string archiveMode = "lz4";
 static int requestedOrderMethod = -1;
 static int simulationSamplePercent = 20;
-static string simulationEngine = "lz4";
+static string simulationEngine = "diff";
 
 string SimulationEngineLabel(const string& engine) {
-    return engine == "zstd" ? "Zstd-1-ST" : "LZ4-default";
+    if (engine == "zstd") return "Zstd-1-ST";
+    if (engine == "lz4") return "LZ4-default";
+    return "Diff";
 }
 
 bool IsInProcessCodec(const string& mode) {
@@ -146,8 +157,9 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
                               vector<long>* simulatedSizes,
                               unsigned candidateMask,
                               int samplePercent,
-                              const string& simulationCodec = "lz4") {
-    if (simulationCodec != "lz4" && simulationCodec != "zstd") {
+                              const string& simulationCodec = "diff") {
+    if (simulationCodec != "lz4" && simulationCodec != "zstd" &&
+        simulationCodec != "diff") {
         return false;
     }
     vector<uint8_t> originBuffer;
@@ -235,43 +247,133 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
         return orderedIdx;
     };
 
-    auto CalculateSizeInMemory = [&](int method) -> long {
+    auto FillSampleBuffer = [&](int method, uint8_t* destination) -> size_t {
+        const size_t chunkSize =
+            max<size_t>(1, min<size_t>(64, blockCount / 16));
+        const size_t totalChunks =
+            (blockCount + chunkSize - 1) / chunkSize;
+        const size_t sampledChunks = min(
+            totalChunks,
+            max<size_t>(1,
+                (totalChunks * static_cast<size_t>(samplePercent) + 99) /
+                    100));
+
+        size_t outBlockIdx = 0;
+        for (size_t chunk = 0;
+             chunk < sampledChunks && outBlockIdx < sampleCount;
+             ++chunk) {
+            const size_t chunkIndex = sampledChunks == 1
+                ? 0
+                : chunk * (totalChunks - 1) / (sampledChunks - 1);
+            const size_t startBlock = chunkIndex * chunkSize;
+            const size_t endBlock = min(blockCount, startBlock + chunkSize);
+            for (size_t orderedIdx = startBlock;
+                 orderedIdx < endBlock && outBlockIdx < sampleCount;
+                 ++orderedIdx) {
+                const size_t sourceIdx = LinearIndexAt(method, orderedIdx);
+                memcpy(destination + outBlockIdx * blockSize,
+                       dPtr + sourceIdx * blockSize, blockSize);
+                ++outBlockIdx;
+            }
+        }
+        return outBlockIdx;
+    };
+
+    auto Load16 = [](const uint8_t* source) -> uint16_t {
+        uint16_t value = 0;
+        memcpy(&value, source, sizeof(value));
+        return value;
+    };
+    auto Load32 = [](const uint8_t* source) -> uint32_t {
+        uint32_t value = 0;
+        memcpy(&value, source, sizeof(value));
+        return value;
+    };
+    auto Load48 = [](const uint8_t* source) -> uint64_t {
+        uint64_t value = 0;
+        memcpy(&value, source, 6);
+        return value;
+    };
+
+    using SimulationScore = uint64_t;
+    constexpr SimulationScore kSimulationFailure =
+        numeric_limits<SimulationScore>::max();
+
+    auto CalculateDiffScore = [&](int method) -> SimulationScore {
         const size_t simulationBufferSize = sampleCount * bytesPerBlock;
         unique_ptr<uint8_t[]> simBuf(new uint8_t[simulationBufferSize]);
-        for (size_t sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx) {
-            const size_t orderedIdx =
-                sampleIdx * blockCount / sampleCount;
-            const size_t sourceIdx = LinearIndexAt(method, orderedIdx);
-            memcpy(simBuf.get() + sampleIdx * blockSize,
-                   dPtr + sourceIdx * blockSize, blockSize);
+        const size_t sampledBlocks = FillSampleBuffer(method, simBuf.get());
+        if (sampledBlocks < 2) return 0;
+
+        SimulationScore totalCost = 0;
+        for (size_t i = 1; i < sampledBlocks; ++i) {
+            const uint8_t* current = simBuf.get() + i * blockSize;
+            const uint8_t* previous = current - blockSize;
+            if (format == BcFormat::BC3) {
+                totalCost += static_cast<SimulationScore>(abs(
+                    static_cast<int>(Load16(current)) -
+                    static_cast<int>(Load16(previous))));
+                totalCost += Load48(current + 2) != Load48(previous + 2)
+                    ? 4U : 0U;
+                const uint32_t currentColor = Load32(current + 8);
+                const uint32_t previousColor = Load32(previous + 8);
+                totalCost += currentColor >= previousColor
+                    ? currentColor - previousColor
+                    : previousColor - currentColor;
+                totalCost += Load32(current + 12) != Load32(previous + 12)
+                    ? 4U : 0U;
+            } else if (format == BcFormat::BC4) {
+                totalCost += static_cast<SimulationScore>(abs(
+                    static_cast<int>(Load16(current)) -
+                    static_cast<int>(Load16(previous))));
+                totalCost += Load48(current + 2) != Load48(previous + 2)
+                    ? 4U : 0U;
+            } else {
+                const uint32_t currentColor = Load32(current);
+                const uint32_t previousColor = Load32(previous);
+                totalCost += currentColor >= previousColor
+                    ? currentColor - previousColor
+                    : previousColor - currentColor;
+                totalCost += Load32(current + 4) != Load32(previous + 4)
+                    ? 4U : 0U;
+            }
         }
+        return totalCost;
+    };
+
+    auto CalculateCompressedSize = [&](int method) -> SimulationScore {
+        const size_t simulationBufferSize = sampleCount * bytesPerBlock;
+        unique_ptr<uint8_t[]> simBuf(new uint8_t[simulationBufferSize]);
+        const size_t sampledBlocks = FillSampleBuffer(method, simBuf.get());
+        const size_t actualSampleBytes = sampledBlocks * blockSize;
+        if (actualSampleBytes == 0) return kSimulationFailure;
 
         if (simulationCodec == "zstd") {
             const size_t compressedCapacity =
-                ZSTD_compressBound(simulationBufferSize);
-            if (ZSTD_isError(compressedCapacity)) return 0;
+                ZSTD_compressBound(actualSampleBytes);
+            if (ZSTD_isError(compressedCapacity)) return kSimulationFailure;
             vector<uint8_t> compressedBuf(compressedCapacity);
             const size_t compressedSize = ZSTD_compress(
                 compressedBuf.data(), compressedCapacity,
-                simBuf.get(), simulationBufferSize, 1);
-            if (ZSTD_isError(compressedSize) ||
-                compressedSize > static_cast<size_t>(LONG_MAX)) {
-                return 0;
-            }
-            return static_cast<long>(compressedSize);
+                simBuf.get(), actualSampleBytes, 1);
+            return ZSTD_isError(compressedSize)
+                ? kSimulationFailure
+                : static_cast<SimulationScore>(compressedSize);
         }
 
-        if (simulationBufferSize > static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
-            return 0;
+        if (actualSampleBytes > static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) {
+            return kSimulationFailure;
         }
-        const int sourceSize = static_cast<int>(simulationBufferSize);
+        const int sourceSize = static_cast<int>(actualSampleBytes);
         const int compressedCapacity = LZ4_compressBound(sourceSize);
-        if (compressedCapacity <= 0) return 0;
+        if (compressedCapacity <= 0) return kSimulationFailure;
         unique_ptr<char[]> compressedBuf(new char[compressedCapacity]);
         const int compressedSize = LZ4_compress_default(
             reinterpret_cast<const char*>(simBuf.get()),
             compressedBuf.get(), sourceSize, compressedCapacity);
-        return compressedSize > 0 ? static_cast<long>(compressedSize) : 0;
+        return compressedSize > 0
+            ? static_cast<SimulationScore>(compressedSize)
+            : kSimulationFailure;
     };
 
     if (forcedMethod >= 0) {
@@ -280,25 +382,37 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
     } else {
         if (candidateMask == 0) return false;
 
-        vector<future<long>> futures(3);
-        vector<long> sizes(3, 0);
+        vector<future<SimulationScore>> futures(3);
+        vector<SimulationScore> scores(3, kSimulationFailure);
         for (int method = 0; method < 3; ++method) {
             if ((candidateMask & (1U << method)) != 0) {
-                futures[method] =
-                    async(launch::async, CalculateSizeInMemory, method);
+                if (simulationCodec == "diff") {
+                    futures[method] =
+                        async(launch::async, CalculateDiffScore, method);
+                } else {
+                    futures[method] =
+                        async(launch::async, CalculateCompressedSize, method);
+                }
             }
         }
 
         bestMethod = -1;
         for (int method = 0; method < 3; ++method) {
             if ((candidateMask & (1U << method)) == 0) continue;
-            sizes[method] = futures[method].get();
-            if (sizes[method] <= 0) return false;
-            if (bestMethod < 0 || sizes[method] < sizes[bestMethod]) {
+            scores[method] = futures[method].get();
+            if (scores[method] == kSimulationFailure) return false;
+            if (bestMethod < 0 || scores[method] < scores[bestMethod]) {
                 bestMethod = method;
             }
         }
-        if (simulatedSizes) *simulatedSizes = sizes;
+        if (simulatedSizes) {
+            simulatedSizes->assign(3, 0);
+            for (int method = 0; method < 3; ++method) {
+                if ((candidateMask & (1U << method)) == 0) continue;
+                (*simulatedSizes)[method] = static_cast<long>(min<SimulationScore>(
+                    scores[method], static_cast<SimulationScore>(LONG_MAX)));
+            }
+        }
     }
 
     auto SourceBlockAt = [&](size_t orderedIdx) -> const uint8_t* {
@@ -319,28 +433,55 @@ bool BuildOurPreprocessedData(const fs::path& inputPath,
     const size_t colorIndexBase = colorEndpointBase + blockCount * 4;
 
     ParallelBlocks::ForRanges(blockCount, [&](size_t begin, size_t end) {
+        uint8_t* const alphaEndpoint = finalData.data() + alphaEndpointBase;
+        uint8_t* const alphaIndex = finalData.data() + alphaIndexBase;
+        uint8_t* const colorEndpoint = finalData.data() + colorEndpointBase;
+        uint8_t* const colorIndex = finalData.data() + colorIndexBase;
         for (size_t i = begin; i < end; ++i) {
             const uint8_t* source = SourceBlockAt(i);
-            if (format == BcFormat::BC3 || format == BcFormat::BC4) {
-                memcpy(finalData.data() + alphaEndpointBase + i * 2,
-                       source, 2);
-                memcpy(finalData.data() + alphaIndexBase + i * 6,
-                       source + 2, 6);
-            }
-            if (format != BcFormat::BC4) {
-                const size_t sourceColorOffset =
-                    format == BcFormat::BC3 ? 8U : 0U;
-                const uint8_t* colorSource = source + sourceColorOffset;
-                memcpy(finalData.data() + colorEndpointBase + i * 4,
-                       colorSource, 4);
-                memcpy(finalData.data() + colorIndexBase + i * 4,
-                       colorSource + 4, 4);
+            if (format == BcFormat::BC3) {
+#if TEXTURE_X86_SIMD
+                const __m128i block = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(source));
+                const uint64_t alpha =
+                    static_cast<uint64_t>(_mm_cvtsi128_si64(block));
+                const __m128i upper = _mm_srli_si128(block, 8);
+                const uint64_t color =
+                    static_cast<uint64_t>(_mm_cvtsi128_si64(upper));
+                memcpy(alphaEndpoint + i * 2, &alpha, 2);
+                const uint64_t alphaIndices = alpha >> 16;
+                memcpy(alphaIndex + i * 6, &alphaIndices, 6);
+                memcpy(colorEndpoint + i * 4, &color, 4);
+                const uint64_t colorIndices = color >> 32;
+                memcpy(colorIndex + i * 4, &colorIndices, 4);
+#else
+                const uint16_t endpoint = Load16(source);
+                const uint64_t indices = Load48(source + 2);
+                memcpy(alphaEndpoint + i * 2, &endpoint, 2);
+                memcpy(alphaIndex + i * 6, &indices, 6);
+                const uint32_t colorEndpointValue = Load32(source + 8);
+                const uint32_t colorIndexValue = Load32(source + 12);
+                memcpy(colorEndpoint + i * 4, &colorEndpointValue, 4);
+                memcpy(colorIndex + i * 4, &colorIndexValue, 4);
+#endif
+            } else if (format == BcFormat::BC4) {
+                const uint16_t endpoint = Load16(source);
+                const uint64_t indices = Load48(source + 2);
+                memcpy(alphaEndpoint + i * 2, &endpoint, 2);
+                memcpy(alphaIndex + i * 6, &indices, 6);
+            } else {
+                const uint32_t endpoint = Load32(source);
+                const uint32_t indices = Load32(source + 4);
+                memcpy(colorEndpoint + i * 4, &endpoint, 4);
+                memcpy(colorIndex + i * 4, &indices, 4);
             }
         }
     });
 
     return true;
 }
+
+#undef TEXTURE_X86_SIMD
 
 bool BuildOurPreprocessedBin(const fs::path& inputPath,
                              const fs::path& outputBinPath,
@@ -349,7 +490,7 @@ bool BuildOurPreprocessedBin(const fs::path& inputPath,
                              vector<long>* simulatedSizes = nullptr,
                              unsigned candidateMask = 0x7U,
                              int samplePercent = 100,
-                             const string& simulationCodec = "lz4") {
+                             const string& simulationCodec = "diff") {
     vector<uint8_t> finalData;
     if (!BuildOurPreprocessedData(
             inputPath, finalData, bestMethod, forcedMethod,
@@ -483,7 +624,7 @@ int main(int argc, char* argv[]) {
              << " <input.dds|folder> [output_folder]"
                 " [lz4|lz4hc|zstd|pigz|7z] [level]"
                 " [auto|scanline|hilbert|zorder] [sample=20|10|100]"
-                " [simulation=lz4|zstd]\n";
+                " [simulation=lz4|zstd|diff]\n";
         return 1;
     }
 
@@ -564,8 +705,9 @@ int main(int argc, char* argv[]) {
     }
     if (argc >= 8) {
         simulationEngine = argv[7];
-        if (simulationEngine != "lz4" && simulationEngine != "zstd") {
-            cerr << "Simulation engine must be lz4 or zstd.\n";
+        if (simulationEngine != "lz4" && simulationEngine != "zstd" &&
+            simulationEngine != "diff") {
+            cerr << "Simulation engine must be lz4, zstd, or diff.\n";
             return 1;
         }
     }

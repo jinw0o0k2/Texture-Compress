@@ -90,7 +90,7 @@ int main(int argc, char* argv[]) {
             << "Usage: " << argv[0]
             << " <input.dds|folder> [raw_csv=overhead_raw.csv]"
                " [lz4|lz4hc|zstd] [level] [runs=5] [sample=20]"
-               " [simulation=lz4|zstd]\n";
+               " [simulation=lz4|zstd|diff]\n";
         return 1;
     }
 
@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
     int level = codec == "lz4hc" ? 3 : (codec == "zstd" ? 1 : 0);
     int runs = 5;
     int samplePercent = 20;
-    string simulationCodec = argc >= 8 ? argv[7] : "lz4";
+    string simulationCodec = argc >= 8 ? argv[7] : "diff";
     try {
         if (argc >= 5) level = std::stoi(argv[4]);
         if (argc >= 6) runs = std::stoi(argv[5]);
@@ -140,8 +140,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "sample must be 100, 20, or 10.\n";
         return 1;
     }
-    if (simulationCodec != "lz4" && simulationCodec != "zstd") {
-        std::cerr << "simulation must be lz4 or zstd.\n";
+    if (simulationCodec != "lz4" && simulationCodec != "zstd" &&
+        simulationCodec != "diff") {
+        std::cerr << "simulation must be lz4, zstd, or diff.\n";
         return 1;
     }
     const string simulationLabel = SimulationEngineLabel(simulationCodec);
